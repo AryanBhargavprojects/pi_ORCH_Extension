@@ -13,7 +13,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/AryanBhargavprojects/pi_ORCH_Extension.git"
+    "url": "git+https://github.com/AryanBhargavprojects/pi_ORCH_Extension.git"
   },
   "homepage": "https://github.com/AryanBhargavprojects/pi_ORCH_Extension#readme",
   "bugs": {
