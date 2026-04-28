@@ -1,0 +1,16 @@
+{
+  "roles": {
+    "orchestrator": {
+      "provider": "openai-codex",
+      "model": "gpt-5.5"
+    },
+    "worker": {
+      "provider": "openai-codex",
+      "model": "gpt-5.4"
+    },
+    "validator": {
+      "provider": "openai-codex",
+      "model": "gpt-5.4-mini"
+    }
+  }
+}

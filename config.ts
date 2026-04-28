@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 
-export type OrchRoleName = "orchestrator" | "worker" | "validator";
+export type OrchRoleName = "orchestrator" | "worker" | "validator" | "smart_friend";
 export type OrchConfigScope = "user" | "project";
 export type OrchConfigValue = number | string;
 
@@ -36,6 +36,7 @@ export type OrchConfigOverrides = {
 		orchestrator?: Partial<OrchRoleModelConfig>;
 		worker?: Partial<OrchRoleModelConfig>;
 		validator?: Partial<OrchRoleModelConfig>;
+		smart_friend?: Partial<OrchRoleModelConfig>;
 	};
 	tokenThresholds?: Partial<OrchTokenThresholds>;
 	paths?: Partial<OrchPathConfig>;
@@ -75,6 +76,8 @@ export const ORCH_CONFIG_KEYS = [
 	"roles.worker.model",
 	"roles.validator.provider",
 	"roles.validator.model",
+	"roles.smart_friend.provider",
+	"roles.smart_friend.model",
 	"tokenThresholds.learningExtraction",
 	"tokenThresholds.contextWarning",
 	"paths.userProfileFile",
@@ -116,6 +119,14 @@ export const ORCH_CONFIG_KEY_INFO: Record<
 		description: "Model used by Orch validators",
 		valueType: "string",
 	},
+	"roles.smart_friend.provider": {
+		description: "Provider used by the Orch smart friend advisor",
+		valueType: "string",
+	},
+	"roles.smart_friend.model": {
+		description: "Model used by the Orch smart friend advisor",
+		valueType: "string",
+	},
 	"tokenThresholds.learningExtraction": {
 		description: "Token count that triggers a learning-extraction prompt",
 		valueType: "number",
@@ -146,7 +157,7 @@ export const ORCH_CONFIG_KEY_INFO: Record<
 	},
 };
 
-const ORCH_ROLE_NAMES: OrchRoleName[] = ["orchestrator", "worker", "validator"];
+const ORCH_ROLE_NAMES: OrchRoleName[] = ["orchestrator", "worker", "validator", "smart_friend"];
 const PROJECT_PATH_KEYS: Array<keyof OrchPathConfig> = [
 	"projectContextFile",
 	"knowledgeBaseFile",
@@ -167,6 +178,10 @@ const DEFAULT_ORCH_CONFIG: OrchConfig = {
 		validator: {
 			provider: "anthropic",
 			model: "claude-sonnet-4-5",
+		},
+		smart_friend: {
+			provider: "anthropic",
+			model: "claude-opus-4-7",
 		},
 	},
 	tokenThresholds: {
@@ -216,6 +231,10 @@ export function getEffectiveOrchConfigValue(config: OrchConfig, key: OrchConfigK
 			return config.roles.validator.provider;
 		case "roles.validator.model":
 			return config.roles.validator.model;
+		case "roles.smart_friend.provider":
+			return config.roles.smart_friend.provider;
+		case "roles.smart_friend.model":
+			return config.roles.smart_friend.model;
 		case "tokenThresholds.learningExtraction":
 			return config.tokenThresholds.learningExtraction;
 		case "tokenThresholds.contextWarning":
@@ -642,6 +661,16 @@ function setValueInOverrides(overrides: OrchConfigOverrides, key: OrchConfigKey,
 			overrides.roles ??= {};
 			overrides.roles.validator ??= {};
 			overrides.roles.validator.model = value as string;
+			return;
+		case "roles.smart_friend.provider":
+			overrides.roles ??= {};
+			overrides.roles.smart_friend ??= {};
+			overrides.roles.smart_friend.provider = value as string;
+			return;
+		case "roles.smart_friend.model":
+			overrides.roles ??= {};
+			overrides.roles.smart_friend ??= {};
+			overrides.roles.smart_friend.model = value as string;
 			return;
 		case "tokenThresholds.learningExtraction":
 			overrides.tokenThresholds ??= {};

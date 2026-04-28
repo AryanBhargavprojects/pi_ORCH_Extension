@@ -27,9 +27,30 @@ import {
 	createReadToolDefinition,
 	createWriteToolDefinition,
 } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import { type Component, Text, truncateToWidth } from "@mariozechner/pi-tui";
+
+import { GLYPHS } from "./constants.js";
+import { formatElapsed, LOADING_VERBS } from "./loading.js";
+import type { DelegationBuffer, DelegationEventKind } from "./mission-types.js";
 
 type OrchTheme = ExtensionContext["ui"]["theme"];
+
+export type SmartFriendBufferStatus = "running" | "done" | "failed" | "aborted";
+
+export type SmartFriendBuffer = {
+	status: SmartFriendBufferStatus;
+	startedAt: number;
+	elapsedMs: number;
+	spinnerIdx: number;
+	question: string;
+	assessment: string;
+	recommendation: string;
+	specificGuidance: string[];
+	filesToRead: string[];
+	needsMoreContext: boolean;
+	followUpPrompt?: string;
+	error?: string;
+};
 
 type ToolContentBlock = TextContent | ImageContent;
 
@@ -45,8 +66,7 @@ type BuiltInTools = {
 
 const toolCache = new Map<string, BuiltInTools>();
 const EXPAND_HINT = "ctrl+o to expand";
-const RESULT_PREFIX = "⎿  ";
-const DETAIL_INDENT = "   ";
+const WATERFALL_PREFIX = `  ${GLYPHS.toolOut}  `;
 
 export function registerCompactToolRenderers(pi: ExtensionAPI): void {
 	registerReadRenderer(pi);
@@ -56,6 +76,44 @@ export function registerCompactToolRenderers(pi: ExtensionAPI): void {
 	registerFindRenderer(pi);
 	registerGrepRenderer(pi);
 	registerLsRenderer(pi);
+}
+
+export function renderDelegateCall(args: unknown, theme: OrchTheme, context?: { state?: Record<string, unknown> }): Component {
+	return new DelegateCallComponent(args, theme, asDelegationBuffer(context?.state?.delegationBuffer));
+}
+
+export function renderDelegateResult(
+	result: { content?: ToolContentBlock[]; details?: unknown },
+	options: { expanded?: boolean },
+	theme: OrchTheme,
+	context?: { state?: Record<string, unknown> },
+): Component {
+	const buffer = getDelegationBufferFromResult(result);
+	if (buffer && context?.state) {
+		context.state.delegationBuffer = buffer;
+	}
+	return new DelegateResultComponent(buffer, options.expanded === true, theme);
+}
+
+export function renderSmartFriendCall(
+	args: unknown,
+	theme: OrchTheme,
+	context?: { state?: Record<string, unknown> },
+): Component {
+	return new SmartFriendCallComponent(args, theme, asSmartFriendBuffer(context?.state?.smartFriendBuffer));
+}
+
+export function renderSmartFriendResult(
+	result: { content?: ToolContentBlock[]; details?: unknown },
+	options: { expanded?: boolean },
+	theme: OrchTheme,
+	context?: { state?: Record<string, unknown> },
+): Component {
+	const buffer = getSmartFriendBufferFromResult(result);
+	if (buffer && context?.state) {
+		context.state.smartFriendBuffer = buffer;
+	}
+	return new SmartFriendResultComponent(buffer, options.expanded === true, theme);
 }
 
 function registerReadRenderer(pi: ExtensionAPI): void {
@@ -223,6 +281,461 @@ function getBuiltInTools(cwd: string): BuiltInTools {
 	return tools;
 }
 
+class DelegateCallComponent implements Component {
+	constructor(
+		private readonly args: unknown,
+		private readonly theme: OrchTheme,
+		private readonly buffer: DelegationBuffer | undefined,
+	) {}
+
+	render(width: number): string[] {
+		const input = asPlainRecord(this.args);
+		const role = String(input?.role ?? this.buffer?.role ?? "agent");
+		const featureId = this.buffer?.featureId ?? inferDelegationFeatureId(input);
+		const header = [
+			this.theme.fg("toolTitle", this.theme.bold("Delegate  ")),
+			this.theme.fg("accent", `${role} → ${featureId}`),
+			this.buffer ? `  ${renderDelegationBadge(this.buffer, this.theme)}` : "",
+		].join("");
+		return [truncateToWidth(header, width, this.theme.fg("dim", GLYPHS.ellipsis))];
+	}
+
+	invalidate(): void {
+		// Stateless.
+	}
+}
+
+class DelegateResultComponent implements Component {
+	constructor(
+		private readonly buffer: DelegationBuffer | undefined,
+		private readonly expanded: boolean,
+		private readonly theme: OrchTheme,
+	) {}
+
+	render(width: number): string[] {
+		const lines = this.buffer
+			? renderDelegationBuffer(this.buffer, this.expanded, this.theme, width)
+			: [buildSummaryLine(this.theme, this.theme.fg("success", "Completed"), this.expanded)];
+		return lines.map((line) => truncateToWidth(line, width, this.theme.fg("dim", GLYPHS.ellipsis)));
+	}
+
+	invalidate(): void {
+		// Stateless.
+	}
+}
+
+class SmartFriendCallComponent implements Component {
+	constructor(
+		private readonly args: unknown,
+		private readonly theme: OrchTheme,
+		private readonly buffer: SmartFriendBuffer | undefined,
+	) {}
+
+	render(width: number): string[] {
+		const input = asPlainRecord(this.args);
+		const question = typeof input?.question === "string" && input.question.trim().length > 0
+			? input.question.trim()
+			: this.buffer?.question ?? "question";
+		const header = [
+			this.theme.fg("toolTitle", this.theme.bold("Smart Friend  ")),
+			this.theme.fg("dim", question),
+		].join("");
+		return [truncateToWidth(header, width, this.theme.fg("dim", GLYPHS.ellipsis))];
+	}
+
+	invalidate(): void {
+		// Stateless.
+	}
+}
+
+class SmartFriendResultComponent implements Component {
+	constructor(
+		private readonly buffer: SmartFriendBuffer | undefined,
+		private readonly expanded: boolean,
+		private readonly theme: OrchTheme,
+	) {}
+
+	render(width: number): string[] {
+		const lines = this.buffer
+			? renderSmartFriendBuffer(this.buffer, this.expanded, this.theme, width)
+			: [buildSummaryLine(this.theme, this.theme.fg("success", "Guidance ready"), this.expanded)];
+		return lines.map((line) => truncateToWidth(line, width, this.theme.fg("dim", GLYPHS.ellipsis)));
+	}
+
+	invalidate(): void {
+		// Stateless.
+	}
+}
+
+function getDelegationBufferFromResult(result: { content?: ToolContentBlock[]; details?: unknown }): DelegationBuffer | undefined {
+	const details = asPlainRecord(result.details);
+	const fromDetails = asDelegationBuffer(details?.delegationBuffer) ?? asDelegationBuffer(result.details);
+	if (fromDetails) {
+		return fromDetails;
+	}
+
+	const raw = result.content ? getTextContent(result.content) : undefined;
+	if (!raw) {
+		return undefined;
+	}
+	try {
+		return asDelegationBuffer(JSON.parse(raw));
+	} catch {
+		return undefined;
+	}
+}
+
+function getSmartFriendBufferFromResult(result: { content?: ToolContentBlock[]; details?: unknown }): SmartFriendBuffer | undefined {
+	const details = asPlainRecord(result.details);
+	const fromDetails = asSmartFriendBuffer(details?.smartFriendBuffer) ?? asSmartFriendBuffer(result.details);
+	if (fromDetails) {
+		return fromDetails;
+	}
+
+	const raw = result.content ? getTextContent(result.content) : undefined;
+	if (!raw) {
+		return undefined;
+	}
+	try {
+		return asSmartFriendBuffer(JSON.parse(raw));
+	} catch {
+		return undefined;
+	}
+}
+
+function renderDelegationBuffer(
+	buffer: DelegationBuffer,
+	expanded: boolean,
+	theme: OrchTheme,
+	width: number,
+): string[] {
+	if (!expanded) {
+		return renderCollapsedDelegationBuffer(buffer, theme, width);
+	}
+	return renderExpandedDelegationBuffer(buffer, theme, width);
+}
+
+function renderSmartFriendBuffer(
+	buffer: SmartFriendBuffer,
+	expanded: boolean,
+	theme: OrchTheme,
+	width: number,
+): string[] {
+	const lines = expanded
+		? renderExpandedSmartFriendBuffer(buffer, theme)
+		: renderCollapsedSmartFriendBuffer(buffer, theme);
+	return lines.map((line) => truncateToWidth(line, width, theme.fg("dim", GLYPHS.ellipsis)));
+}
+
+function renderDelegationBadge(buffer: DelegationBuffer, theme: OrchTheme): string {
+	if (buffer.status === "running") {
+		return theme.fg("accent", `${GLYPHS.inProgress} running`);
+	}
+	if (buffer.status === "done") {
+		return theme.fg("success", `${GLYPHS.pass} done`);
+	}
+	if (buffer.status === "failed") {
+		const issueLabel = buffer.issueCount > 0 ? `  ${buffer.issueCount} ${buffer.issueCount === 1 ? "issue" : "issues"}` : "";
+		return theme.fg("error", `${GLYPHS.fail} failed${issueLabel}`);
+	}
+	return theme.fg("error", `${GLYPHS.fail} aborted`);
+}
+
+function renderCollapsedDelegationBuffer(buffer: DelegationBuffer, theme: OrchTheme, width: number): string[] {
+	if (buffer.status === "running") {
+		const frame = GLYPHS.spinner[buffer.spinnerIdx % GLYPHS.spinner.length] ?? GLYPHS.spinner[0];
+		const verb = LOADING_VERBS[buffer.verbIdx % LOADING_VERBS.length]?.[0] ?? "Thinking";
+		return [
+			buildSummaryLine(
+				theme,
+				[
+					theme.fg("accent", `${frame} `),
+					theme.fg("muted", `${verb}${GLYPHS.ellipsis}  `),
+					theme.fg("dim", formatElapsed(buffer.elapsedMs)),
+				].join(""),
+				false,
+			),
+		];
+	}
+
+	if (buffer.status === "failed" && buffer.issueCount > 0) {
+		const issueLines = buffer.finalIssues.slice(0, 3).map((issue) =>
+			`${getWaterfallPrefix(theme)}${theme.fg("error", `${GLYPHS.fail} ${issue.title}`)}${theme.fg("dim", ` (${issue.severity})`)}`,
+		);
+		if (buffer.finalIssues.length > 3) {
+			issueLines.push(
+				`${getWaterfallPrefix(theme)}${theme.fg("dim", `${GLYPHS.ellipsis} ${buffer.finalIssues.length - 3} more  (${EXPAND_HINT})`)}`,
+			);
+		} else if (issueLines.length > 0) {
+			issueLines[issueLines.length - 1] += theme.fg("dim", `  (${EXPAND_HINT})`);
+		}
+		return issueLines.map((line) => truncateToWidth(line, width, theme.fg("dim", GLYPHS.ellipsis)));
+	}
+
+	if (buffer.status === "aborted") {
+		return [buildSummaryLine(theme, theme.fg("error", `Interrupted after ${formatElapsed(buffer.elapsedMs)}`), false)];
+	}
+
+	if (buffer.status === "failed") {
+		return [buildSummaryLine(theme, theme.fg("error", buffer.finalSummary || "Delegate failed"), false)];
+	}
+
+	const parts = buildDelegationCountParts(buffer);
+	return [buildSummaryLine(theme, theme.fg("muted", parts.length > 0 ? parts.join(" • ") : "no tool calls"), false)];
+}
+
+function renderExpandedDelegationBuffer(buffer: DelegationBuffer, theme: OrchTheme, width: number): string[] {
+	const lines: string[] = [];
+	const waterfallPrefix = getWaterfallPrefix(theme);
+
+	for (const event of buffer.events) {
+		lines.push(...renderDelegationEvent(event, theme, waterfallPrefix));
+	}
+
+	if (buffer.status === "running" && lines.length === 0) {
+		const frame = GLYPHS.spinner[buffer.spinnerIdx % GLYPHS.spinner.length] ?? GLYPHS.spinner[0];
+		const verb = LOADING_VERBS[buffer.verbIdx % LOADING_VERBS.length]?.[0] ?? "Thinking";
+		lines.push(`${waterfallPrefix}${theme.fg("accent", `${frame} `)}${theme.fg("muted", `${verb}${GLYPHS.ellipsis}`)} ${theme.fg("dim", formatElapsed(buffer.elapsedMs))}`);
+	}
+
+	if (lines.length > 0 && buffer.status !== "running") {
+		lines.push(waterfallPrefix);
+	}
+
+	if (buffer.status === "done" || buffer.status === "failed") {
+		if (buffer.finalSummary) {
+			const summaryLines = buffer.finalSummary.replace(/\r/g, "").split("\n").filter((line) => line.trim().length > 0);
+			for (let index = 0; index < summaryLines.length; index++) {
+				const label = index === 0 ? "Summary: " : "  ";
+				lines.push(`${waterfallPrefix}${theme.fg("muted", `${label}${summaryLines[index]}`)}`);
+			}
+		}
+		if (buffer.finalHandoff) {
+			lines.push(waterfallPrefix);
+			const handoffLines = buffer.finalHandoff.replace(/\r/g, "").split("\n").filter((line) => line.trim().length > 0);
+			for (let index = 0; index < handoffLines.length; index++) {
+				const label = index === 0 ? "Handoff: " : "  ";
+				lines.push(`${waterfallPrefix}${theme.fg("dim", `${label}${handoffLines[index]}`)}`);
+			}
+		}
+		if (buffer.finalIssues.length > 0) {
+			for (const issue of buffer.finalIssues) {
+				lines.push(`${waterfallPrefix}${theme.fg("error", `${GLYPHS.fail} ${issue.title}`)}${theme.fg("dim", ` (${issue.severity})`)}`);
+				for (const line of issue.details.replace(/\r/g, "").split("\n")) {
+					if (line.trim().length > 0) {
+						lines.push(`${waterfallPrefix}${theme.fg("dim", `  ${line}`)}`);
+					}
+				}
+			}
+		}
+	} else if (buffer.status === "aborted") {
+		lines.push(`${waterfallPrefix}${theme.fg("error", `Interrupted after ${formatElapsed(buffer.elapsedMs)}`)}`);
+	}
+
+	const rendered = lines.length > 0 ? lines : [buildSummaryLine(theme, theme.fg("muted", "no delegate activity yet"), true)];
+	return rendered.map((line) => truncateToWidth(line, width, theme.fg("dim", GLYPHS.ellipsis)));
+}
+
+function renderDelegationEvent(event: DelegationEventKind, theme: OrchTheme, waterfallPrefix: string): string[] {
+	if (event.kind === "thinking") {
+		const snippet = event.text.trim().slice(-120).replace(/\n+/g, " ");
+		return snippet.length > 0 ? [`${waterfallPrefix}${theme.fg("dim", `${GLYPHS.spinner[0]} ${snippet}`)}`] : [];
+	}
+
+	if (event.kind === "text") {
+		const paragraphs = event.text.trim().split(/\n{2,}/);
+		const lastParagraph = (paragraphs.at(-1) ?? "").trim();
+		return lastParagraph
+			.replace(/\r/g, "")
+			.split("\n")
+			.slice(-3)
+			.filter((line) => line.trim().length > 0)
+			.map((line) => `${waterfallPrefix}${theme.fg("toolOutput", line)}`);
+	}
+
+	return [
+		`${waterfallPrefix}${theme.fg("toolTitle", theme.bold(`${event.label}  `))}${theme.fg("accent", event.detail)}`,
+	];
+}
+
+function buildDelegationCountParts(buffer: DelegationBuffer): string[] {
+	const parts: string[] = [];
+	if (buffer.edits > 0) {
+		parts.push(`${buffer.edits} ${buffer.edits === 1 ? "edit" : "edits"}`);
+	}
+	if (buffer.bashes > 0) {
+		parts.push(`${buffer.bashes} bash ${buffer.bashes === 1 ? "run" : "runs"}`);
+	}
+	if (buffer.reads > 0) {
+		parts.push(`${buffer.reads} ${buffer.reads === 1 ? "read" : "reads"}`);
+	}
+	if (buffer.otherTools > 0) {
+		parts.push(`${buffer.otherTools} other`);
+	}
+	return parts;
+}
+
+function inferDelegationFeatureId(input: Record<string, unknown> | undefined): string {
+	const explicit = input?.featureId ?? input?.feature;
+	if (typeof explicit === "string" && explicit.trim().length > 0) {
+		return explicit.trim();
+	}
+	const task = typeof input?.task === "string" ? input.task : "";
+	const firstLine = task
+		.replace(/\r/g, "")
+		.split("\n")
+		.map((line) => line.trim())
+		.find((line) => line.length > 0);
+	return firstLine ? truncatePlainText(firstLine, 48) : "task";
+}
+
+function asDelegationBuffer(value: unknown): DelegationBuffer | undefined {
+	const record = asPlainRecord(value);
+	if (!record) {
+		return undefined;
+	}
+	const status = record.status;
+	const role = record.role;
+	if (
+		(role !== "orchestrator" && role !== "worker" && role !== "validator") ||
+		(status !== "running" && status !== "done" && status !== "failed" && status !== "aborted") ||
+		!Array.isArray(record.events)
+	) {
+		return undefined;
+	}
+	return record as DelegationBuffer;
+}
+
+function renderCollapsedSmartFriendBuffer(buffer: SmartFriendBuffer, theme: OrchTheme): string[] {
+	if (buffer.status === "running") {
+		const frame = GLYPHS.spinner[buffer.spinnerIdx % GLYPHS.spinner.length] ?? GLYPHS.spinner[0];
+		return [
+			buildSummaryLine(
+				theme,
+				[
+					theme.fg("accent", `${frame} `),
+					theme.fg("muted", `Consulting${GLYPHS.ellipsis}  `),
+					theme.fg("dim", formatElapsed(buffer.elapsedMs)),
+				].join(""),
+				false,
+			),
+		];
+	}
+
+	if (buffer.status === "aborted") {
+		return [buildSummaryLine(theme, theme.fg("error", `Interrupted after ${formatElapsed(buffer.elapsedMs)}`), false)];
+	}
+
+	if (buffer.status === "failed") {
+		return [buildSummaryLine(theme, theme.fg("error", buffer.error || "Smart friend failed"), false)];
+	}
+
+	if (buffer.needsMoreContext) {
+		const count = buffer.filesToRead.length;
+		return [
+			buildSummaryLine(
+				theme,
+				theme.fg("accent", `${GLYPHS.inProgress} More context needed — read ${count} ${pluralize(count, "file")}`),
+				false,
+			),
+		];
+	}
+
+	return [
+		buildSummaryLine(
+			theme,
+			theme.fg("success", `${GLYPHS.pass} Guidance ready — ${buffer.specificGuidance.length} ${pluralize(buffer.specificGuidance.length, "step")}`),
+			false,
+		),
+	];
+}
+
+function renderExpandedSmartFriendBuffer(buffer: SmartFriendBuffer, theme: OrchTheme): string[] {
+	const waterfallPrefix = getWaterfallPrefix(theme);
+	const lines: string[] = [];
+
+	if (buffer.status === "running") {
+		const frame = GLYPHS.spinner[buffer.spinnerIdx % GLYPHS.spinner.length] ?? GLYPHS.spinner[0];
+		return [`${waterfallPrefix}${theme.fg("accent", `${frame} `)}${theme.fg("muted", `Consulting${GLYPHS.ellipsis}`)} ${theme.fg("dim", formatElapsed(buffer.elapsedMs))}`];
+	}
+
+	if (buffer.assessment) {
+		lines.push(...formatSmartFriendSection("Assessment: ", buffer.assessment, theme));
+	}
+	if (buffer.assessment && (buffer.recommendation || buffer.specificGuidance.length > 0 || buffer.filesToRead.length > 0 || buffer.followUpPrompt || buffer.error)) {
+		lines.push(waterfallPrefix);
+	}
+	if (buffer.recommendation) {
+		lines.push(...formatSmartFriendSection("Recommendation: ", buffer.recommendation, theme));
+	}
+	if (buffer.recommendation && (buffer.specificGuidance.length > 0 || buffer.filesToRead.length > 0 || buffer.followUpPrompt || buffer.error)) {
+		lines.push(waterfallPrefix);
+	}
+	if (buffer.specificGuidance.length > 0) {
+		lines.push(`${waterfallPrefix}${theme.fg("muted", "Guidance:")}`);
+		for (const [index, step] of buffer.specificGuidance.entries()) {
+			lines.push(...formatSmartFriendSection(`  ${index + 1}. `, step, theme));
+		}
+	}
+	if (buffer.filesToRead.length > 0) {
+		if (lines.length > 0) {
+			lines.push(waterfallPrefix);
+		}
+		lines.push(`${waterfallPrefix}${theme.fg("muted", "Files to read:")}`);
+		for (const file of buffer.filesToRead) {
+			lines.push(`${waterfallPrefix}${theme.fg("accent", `  - ${file}`)}`);
+		}
+	}
+	if (buffer.followUpPrompt) {
+		if (lines.length > 0) {
+			lines.push(waterfallPrefix);
+		}
+		lines.push(...formatSmartFriendSection("Follow-up prompt: ", buffer.followUpPrompt, theme));
+	}
+	if (buffer.error) {
+		if (lines.length > 0) {
+			lines.push(waterfallPrefix);
+		}
+		lines.push(`${waterfallPrefix}${theme.fg("error", buffer.error)}`);
+	}
+	if (buffer.status === "aborted" && !buffer.error) {
+		if (lines.length > 0) {
+			lines.push(waterfallPrefix);
+		}
+		lines.push(`${waterfallPrefix}${theme.fg("error", `Interrupted after ${formatElapsed(buffer.elapsedMs)}`)}`);
+	}
+
+	return lines.length > 0 ? lines : [buildSummaryLine(theme, theme.fg("muted", "no smart friend guidance yet"), true)];
+}
+
+function formatSmartFriendSection(label: string, text: string, theme: OrchTheme): string[] {
+	const normalizedLines = text.replace(/\r/g, "").split("\n").filter((line) => line.trim().length > 0);
+	if (normalizedLines.length === 0) {
+		return [];
+	}
+	const waterfallPrefix = getWaterfallPrefix(theme);
+	return normalizedLines.map((line, index) => `${waterfallPrefix}${theme.fg(index === 0 ? "muted" : "dim", `${index === 0 ? label : "  "}${line.trim()}`)}`);
+}
+
+function asSmartFriendBuffer(value: unknown): SmartFriendBuffer | undefined {
+	const record = asPlainRecord(value);
+	if (!record) {
+		return undefined;
+	}
+	const status = record.status;
+	if (status !== "running" && status !== "done" && status !== "failed" && status !== "aborted") {
+		return undefined;
+	}
+	if (!Array.isArray(record.specificGuidance) || !Array.isArray(record.filesToRead)) {
+		return undefined;
+	}
+	return record as SmartFriendBuffer;
+}
+
+function asPlainRecord(value: unknown): Record<string, unknown> | undefined {
+	return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
 function formatReadCall(args: ReadToolInput, cwd: string, theme: OrchTheme): string {
 	const path = formatPathForDisplay(args.path, cwd);
 	const range = formatReadRange(args.offset, args.limit);
@@ -237,7 +750,7 @@ function formatReadResult(
 ): string {
 	const textContent = getTextContent(content);
 	if (!textContent) {
-		return `${theme.fg("dim", RESULT_PREFIX)}${theme.fg("success", "Loaded image")}`;
+		return `${theme.fg("dim", WATERFALL_PREFIX)}${theme.fg("success", "Loaded image")}`;
 	}
 
 	const totalLines = details?.truncation?.totalLines ?? countLines(textContent);
@@ -471,14 +984,14 @@ function formatLsResult(
 
 function buildSummaryLine(theme: OrchTheme, body: string, expanded: boolean): string {
 	const hint = expanded ? "" : theme.fg("dim", ` (${EXPAND_HINT})`);
-	return `${theme.fg("dim", RESULT_PREFIX)}${body}${hint}`;
+	return `${getWaterfallPrefix(theme)}${body}${hint}`;
 }
 
 function formatExpandedBlock(text: string, theme: OrchTheme): string {
 	return text
 		.replace(/\r/g, "")
 		.split("\n")
-		.map((line) => `${DETAIL_INDENT}${theme.fg("toolOutput", line)}`)
+		.map((line) => `${getWaterfallPrefix(theme)}${theme.fg("toolOutput", line)}`)
 		.join("\n");
 }
 
@@ -486,15 +999,19 @@ function formatDiffBlock(diff: string, theme: OrchTheme): string {
 	return diff
 		.replace(/\r/g, "")
 		.split("\n")
-		.map((line) => `${DETAIL_INDENT}${colorizeDiffLine(line, theme)}`)
+		.map((line) => `${getWaterfallPrefix(theme)}${colorizeDiffLine(line, theme)}`)
 		.join("\n");
 }
 
+function getWaterfallPrefix(theme: OrchTheme): string {
+	return theme.fg("dim", WATERFALL_PREFIX);
+}
+
 function colorizeDiffLine(line: string, theme: OrchTheme): string {
-	if (line.startsWith("+") && !line.startsWith("+++")) {
+	if (line.startsWith(GLYPHS.diffAdd) && !line.startsWith(`${GLYPHS.diffAdd}${GLYPHS.diffAdd}${GLYPHS.diffAdd}`)) {
 		return theme.fg("success", line);
 	}
-	if (line.startsWith("-") && !line.startsWith("---")) {
+	if (line.startsWith(GLYPHS.diffRemove) && !line.startsWith(`${GLYPHS.diffRemove}${GLYPHS.diffRemove}${GLYPHS.diffRemove}`)) {
 		return theme.fg("error", line);
 	}
 	return theme.fg("toolOutput", line);
@@ -504,10 +1021,10 @@ function countDiffStats(diff: string): { additions: number; removals: number } {
 	let additions = 0;
 	let removals = 0;
 	for (const line of diff.split("\n")) {
-		if (line.startsWith("+") && !line.startsWith("+++")) {
+		if (line.startsWith(GLYPHS.diffAdd) && !line.startsWith(`${GLYPHS.diffAdd}${GLYPHS.diffAdd}${GLYPHS.diffAdd}`)) {
 			additions++;
 		}
-		if (line.startsWith("-") && !line.startsWith("---")) {
+		if (line.startsWith(GLYPHS.diffRemove) && !line.startsWith(`${GLYPHS.diffRemove}${GLYPHS.diffRemove}${GLYPHS.diffRemove}`)) {
 			removals++;
 		}
 	}
@@ -555,7 +1072,7 @@ function truncatePlainText(value: string, maxLength: number): string {
 	if (singleLine.length <= maxLength) {
 		return singleLine;
 	}
-	return `${singleLine.slice(0, maxLength - 3)}...`;
+	return `${singleLine.slice(0, maxLength - 3)}${GLYPHS.ellipsis}`;
 }
 
 function getTextContent(content: ToolContentBlock[]): string | undefined {

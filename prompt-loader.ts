@@ -8,7 +8,8 @@ const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 const PROMPTS_DIR = join(EXTENSION_DIR, "prompts");
 
 export function getOrchRolePromptPath(role: OrchRoleName): string {
-	return join(PROMPTS_DIR, `${role}.md`);
+	const fileName = role === "smart_friend" ? "smart-friend.md" : `${role}.md`;
+	return join(PROMPTS_DIR, fileName);
 }
 
 export async function loadOrchRolePrompt(role: OrchRoleName): Promise<string> {

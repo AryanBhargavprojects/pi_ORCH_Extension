@@ -24,7 +24,7 @@ type OrchModelChoice = {
 	label: string;
 };
 
-const ORCH_ROLE_NAMES: OrchRoleName[] = ["orchestrator", "worker", "validator"];
+const ORCH_ROLE_NAMES: OrchRoleName[] = ["orchestrator", "worker", "validator", "smart_friend"];
 
 export function registerOrchModelCommand(pi: ExtensionAPI, state: OrchRuntimeState): void {
 	pi.registerCommand(ORCH_COMMANDS.model, {
@@ -268,13 +268,14 @@ function buildAvailableModelsText(choices: OrchModelChoice[]): string {
 }
 
 function buildUsageText(): string {
+	const roles = ORCH_ROLE_NAMES.join("|");
 	return [
 		"Usage:",
 		`  /${ORCH_COMMANDS.model}`,
-		`  /${ORCH_COMMANDS.model} <orchestrator|worker|validator>`,
-		`  /${ORCH_COMMANDS.model} <user|project> <orchestrator|worker|validator>`,
-		`  /${ORCH_COMMANDS.model} <orchestrator|worker|validator> <provider/model>`,
-		`  /${ORCH_COMMANDS.model} <user|project> <orchestrator|worker|validator> <provider/model>`,
+		`  /${ORCH_COMMANDS.model} <${roles}>`,
+		`  /${ORCH_COMMANDS.model} <user|project> <${roles}>`,
+		`  /${ORCH_COMMANDS.model} <${roles}> <provider/model>`,
+		`  /${ORCH_COMMANDS.model} <user|project> <${roles}> <provider/model>`,
 	].join("\n");
 }
 

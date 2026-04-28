@@ -9,12 +9,14 @@ import { registerMissionCommand } from "./mission.js";
 import { registerOrchMessageRenderer } from "./messages.js";
 import { registerOrchModelCommand } from "./model-command.js";
 import { clearOrchStatus, createRuntimeState, markSessionStart, setOrchStatus } from "./runtime.js";
+import { registerOrchLoadingIndicator } from "./loading.js";
 import { registerCompactToolRenderers } from "./tool-renderers.js";
 
 export default function orchExtension(pi: ExtensionAPI): void {
 	const runtimeState = createRuntimeState();
 
 	registerOrchMessageRenderer(pi);
+	registerOrchLoadingIndicator(pi);
 	registerCompactToolRenderers(pi);
 	registerOrchCommands(pi, runtimeState);
 	registerOrchFooter(pi, runtimeState);

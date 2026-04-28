@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import { type Component, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
 import { loadOrchConfig, type OrchLoadedConfig } from "./config.js";
 import {
@@ -10,7 +10,7 @@ import {
 	setupCmuxMissionStreaming,
 	writeCmuxRoleMarker,
 } from "./cmux-streaming.js";
-import { ORCH_COMMANDS, ORCH_WIDGET_IDS } from "./constants.js";
+import { GLYPHS, ORCH_COMMANDS, ORCH_WIDGET_IDS } from "./constants.js";
 import {
 	type FeatureAttemptRecord,
 	type FeatureRunRecord,
@@ -21,6 +21,7 @@ import {
 	type MissionFixTask,
 	type MissionLiveState,
 	type MissionMilestone,
+	type MissionMilestoneStateEntry,
 	type MissionPlan,
 	type MissionPromptSharedState,
 	type MissionRecord,
@@ -75,10 +76,10 @@ type OrchTheme = ExtensionCommandContext["ui"]["theme"];
 type MissionProgressColor = "accent" | "success" | "error" | "dim" | "muted";
 
 const FEATURE_STATUS_SYMBOLS: Record<MissionFeatureStateStatus, string> = {
-	pending: "○",
-	"in-progress": "◆",
-	done: "✓",
-	failed: "✗",
+	pending: GLYPHS.pending,
+	"in-progress": GLYPHS.inProgress,
+	done: GLYPHS.done,
+	failed: GLYPHS.fail,
 };
 
 const FEATURE_STATUS_COLORS: Record<MissionFeatureStateStatus, MissionProgressColor> = {
@@ -88,12 +89,6 @@ const FEATURE_STATUS_COLORS: Record<MissionFeatureStateStatus, MissionProgressCo
 	failed: "error",
 };
 
-const MILESTONE_STATUS_COLORS: Record<MissionFeatureStateStatus, MissionProgressColor> = {
-	pending: "muted",
-	"in-progress": "accent",
-	done: "success",
-	failed: "error",
-};
 
 export function hasActiveMission(state: OrchRuntimeState): boolean {
 	return state.activeMission !== undefined;
@@ -164,8 +159,10 @@ export function registerMissionCommand(pi: ExtensionAPI, state: OrchRuntimeState
 						result.record.status === "completed" ? "success" : "warning",
 						"mission",
 					);
+					emitMissionRecap(pi, ctx, `mission ${result.record.status === "completed" ? "completed" : "needs attention"}`);
 				} catch (error) {
 					reportMissionEvent(pi, ctx, "Mission failed", formatErrorMessage(error), "error", "mission");
+					emitMissionRecap(pi, ctx, "mission failed");
 				} finally {
 					setMissionStatus(ctx, state, undefined);
 					clearMissionThinkingWidget(ctx);
@@ -258,6 +255,7 @@ function startMissionInBackground(
 				result.record.status === "completed" ? "success" : "warning",
 				"mission",
 			);
+			emitMissionRecap(pi, ctx, `mission ${result.record.status === "completed" ? "completed" : "needs attention"}`);
 		} catch (error) {
 			if (mission.abortController.signal.aborted) {
 				setFooterTransientMood(state, "interrupted", 1800);
@@ -271,6 +269,7 @@ function startMissionInBackground(
 					"warning",
 					"mission",
 				);
+				emitMissionRecap(pi, ctx, "mission interrupted");
 			} else {
 				setFooterTransientMood(state, "error", 2200);
 				reportMissionEvent(pi, ctx, "Mission failed", formatErrorMessage(error), "error", "mission");
@@ -515,6 +514,7 @@ async function runAutonomousMission(
 						validatorVerdict: null,
 					});
 				}
+				emitWorkerChanges(pi, ctx, workerResult.changes);
 
 				setMissionStatus(ctx, state, `validating ${feature.title} (attempt ${attempt})`);
 				await syncMissionLiveState({
@@ -679,6 +679,11 @@ async function runAutonomousMission(
 			}
 
 			featureRuns.push(featureRun);
+			emitMissionRecap(
+				pi,
+				ctx,
+				`feature ${feature.title} ${passed ? "passed" : "failed"}${passed ? ` after ${featureRun.attempts.length} attempt${featureRun.attempts.length === 1 ? "" : "s"}` : ""}`,
+			);
 			if (!passed) {
 				missionStatus = "failed";
 				await syncMissionMilestoneState(milestone.id, {
@@ -750,6 +755,7 @@ async function runAutonomousMission(
 				"error",
 				"validate",
 			);
+			emitMissionRecap(pi, ctx, `milestone ${milestone.title} failed`);
 			break;
 		}
 		reportMissionEvent(
@@ -760,6 +766,7 @@ async function runAutonomousMission(
 			"success",
 			"validate",
 		);
+		emitMissionRecap(pi, ctx, `milestone ${milestone.title} passed`);
 	}
 
 	let finalValidation: ValidationResult | undefined;
@@ -1472,6 +1479,11 @@ function handleSubagentStreamEvent(
 		return;
 	}
 
+	if (event.type === "tool_call") {
+		appendCmuxRoleDelta(mission.cmuxStreaming, event.role, `\n[${event.label}] ${event.detail}\n`);
+		return;
+	}
+
 	appendCmuxRoleDelta(mission.cmuxStreaming, event.role, event.delta);
 
 	if (event.role === "orchestrator") {
@@ -1487,11 +1499,13 @@ function handleSubagentStreamEvent(
 function updateMissionThinkingWidget(ctx: ExtensionCommandContext, mission: OrchActiveMission): void {
 	if (!ctx.hasUI) return;
 
-	ctx.ui.setWidget(ORCH_WIDGET_IDS.missionBlock, (_tui, theme) => {
-		return new Text(buildMissionBlockText(theme, mission), 1, 1, (value: string) => theme.bg("toolPendingBg", value));
-	});
+	ctx.ui.setWidget(
+		ORCH_WIDGET_IDS.missionProgress,
+		(_tui, theme) => new OrchMissionProgressComponent(theme, mission),
+		{ placement: "belowEditor" },
+	);
+	ctx.ui.setWidget(ORCH_WIDGET_IDS.missionBlock, undefined);
 	ctx.ui.setWidget(ORCH_WIDGET_IDS.missionThinking, undefined);
-	ctx.ui.setWidget(ORCH_WIDGET_IDS.missionProgress, undefined);
 }
 
 function clearMissionThinkingWidget(ctx: ExtensionCommandContext): void {
@@ -1501,75 +1515,150 @@ function clearMissionThinkingWidget(ctx: ExtensionCommandContext): void {
 	ctx.ui.setWidget(ORCH_WIDGET_IDS.missionProgress, undefined);
 }
 
-function buildMissionBlockText(theme: OrchTheme, mission: OrchActiveMission): string {
-	const lines = [
-		theme.fg("accent", theme.bold("Orch Mission")),
-		theme.fg("dim", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
-		theme.fg("muted", `Goal: ${truncateInlineText(mission.goal, MAX_MISSION_GOAL_LENGTH)}`),
-		theme.fg("accent", `Current task: ${describeCurrentMissionTask(mission)}`),
-	];
+class OrchMissionProgressComponent implements Component {
+	constructor(
+		private readonly theme: OrchTheme,
+		private readonly mission: OrchActiveMission,
+	) {}
 
-	if (mission.featuresState && mission.liveState) {
-		lines.push("");
-		lines.push(theme.fg("warning", theme.bold("To-do list")));
-		lines.push(...buildMissionChecklistLines(theme, mission.featuresState, mission.liveState));
+	render(width: number): string[] {
+		return renderMissionProgressLines(this.theme, this.mission, width);
 	}
 
-	lines.push("");
-	lines.push(theme.fg("warning", theme.bold("Last orchestrator update")));
-	lines.push(theme.fg("dim", truncateInlineText(getLastOrchestratorLine(mission), MAX_MISSION_GOAL_LENGTH)));
-	lines.push("");
-	lines.push(theme.fg("muted", `Phase: ${mission.phase} • /orch takeover to interrupt`));
-	return lines.join("\n");
+	handleInput(): void {
+		// No-op.
+	}
+
+	invalidate(): void {
+		// Mission data is read on each render.
+	}
 }
 
-function buildMissionChecklistLines(
-	theme: OrchTheme,
-	featuresState: MissionFeaturesStateFile,
-	liveState: MissionLiveState,
-): string[] {
-	const completedFeatures = featuresState.features.filter((feature) => feature.status === "done").length;
-	const failedFeatures = featuresState.features.filter((feature) => feature.status === "failed").length;
-	const completedMilestones = featuresState.milestones.filter((milestone) => milestone.status === "done").length;
-	const failedMilestones = featuresState.milestones.filter((milestone) => milestone.status === "failed").length;
+function renderMissionProgressLines(theme: OrchTheme, mission: OrchActiveMission, width: number): string[] {
 	const lines: string[] = [];
+	const featuresState = mission.featuresState;
+	const liveState = mission.liveState;
+	const currentMilestone = getCurrentMilestone(mission);
 
-	for (let index = 0; index < featuresState.milestones.length; index++) {
-		const milestone = featuresState.milestones[index]!;
-		lines.push(theme.fg(getMilestoneColor(milestone.status), theme.bold(milestone.title)));
-		for (const feature of featuresState.features.filter((entry) => entry.milestoneId === milestone.id)) {
-			let featureLine = `${getFeatureSymbol(feature.status)} ${feature.id}: ${feature.title}`;
-			if (feature.status === "in-progress" && feature.attempts > 1) {
-				featureLine += ` ← attempt ${feature.attempts}`;
-			}
-			lines.push(`  ${theme.fg(getFeatureColor(feature.status), featureLine)}`);
+	lines.push(formatMissionLine(theme, width, GLYPHS.boxTopLeft, ` Mission: ${truncateInlineText(mission.goal, 120)}`));
+	lines.push(formatMissionLine(theme, width, GLYPHS.boxVert, ` Task: ${describeCurrentMissionTask(mission)}`));
+
+	if (currentMilestone) {
+		let milestoneBody = ` Milestone: ${truncateInlineText(currentMilestone.title, 80)}`;
+		if (featuresState) {
+			milestoneBody += ` · ${getMilestoneProgressText(featuresState, currentMilestone.id)}`;
 		}
-		if (index < featuresState.milestones.length - 1) {
-			lines.push("");
+		milestoneBody += ` · ${getMilestoneStatusText(theme, currentMilestone.status)}`;
+		lines.push(formatMissionLine(theme, width, GLYPHS.boxVert, milestoneBody));
+	} else if (featuresState) {
+		lines.push(formatMissionLine(theme, width, GLYPHS.boxVert, ` Progress: ${getOverallMissionProgressText(featuresState)}`));
+	}
+
+	if (featuresState) {
+		const visibleFeatures = currentMilestone
+			? featuresState.features.filter((feature) => feature.milestoneId === currentMilestone.id)
+			: featuresState.features;
+		for (const feature of visibleFeatures) {
+			lines.push(formatMissionLine(theme, width, GLYPHS.boxVert, ` ${formatFeatureProgress(theme, feature, mission)}`));
 		}
 	}
 
-	const progressParts = [
-		`${completedFeatures}/${featuresState.features.length} features done`,
-		`${completedMilestones}/${featuresState.milestones.length} milestones done`,
-	];
-	if (failedFeatures > 0) {
-		progressParts.push(`${failedFeatures} feature${failedFeatures === 1 ? "" : "s"} failed`);
+	lines.push(formatMissionLine(theme, width, GLYPHS.boxVert, ` Last update: ${truncateInlineText(getLastOrchestratorLine(mission), 90)}`));
+	if (liveState) {
+		const phaseSuffix = liveState.currentAttempt !== null ? ` · attempt ${liveState.currentAttempt}` : "";
+		lines.push(formatMissionLine(theme, width, GLYPHS.boxVert, ` Phase: ${truncateInlineText(liveState.phase, 72)}${phaseSuffix}`));
 	}
-	if (failedMilestones > 0) {
-		progressParts.push(`${failedMilestones} milestone${failedMilestones === 1 ? "" : "s"} failed`);
-	}
-	lines.push("");
-	lines.push(theme.fg("muted", `Progress: ${progressParts.join(" · ")}`));
-	lines.push(
-		theme.fg(
-			"muted",
-			`Live phase: ${liveState.phase}${liveState.currentAttempt !== null ? ` · attempt ${liveState.currentAttempt}` : ""}`,
-		),
-	);
-
+	lines.push(formatMissionLine(theme, width, GLYPHS.boxBottomLeft, " /orch takeover"));
 	return lines;
 }
+
+function formatMissionLine(theme: OrchTheme, width: number, leftGlyph: string, body: string): string {
+	const styledGlyph = theme.fg("dim", leftGlyph);
+	if (width <= visibleWidth(styledGlyph)) {
+		return truncateToWidth(styledGlyph, width, "");
+	}
+	const prefix = `${styledGlyph} `;
+	const contentWidth = Math.max(0, width - visibleWidth(prefix));
+	const content = truncateToWidth(body, contentWidth, theme.fg("dim", GLYPHS.ellipsis));
+	return truncateToWidth(`${prefix}${content}`, width, theme.fg("dim", GLYPHS.ellipsis));
+}
+
+function getCurrentMilestone(mission: OrchActiveMission): MissionMilestoneStateEntry | undefined {
+	const milestoneId = mission.liveState?.currentMilestoneId;
+	if (!milestoneId) {
+		return undefined;
+	}
+	return mission.featuresState?.milestones.find((milestone) => milestone.id === milestoneId);
+}
+
+function getMilestoneProgressText(featuresState: MissionFeaturesStateFile, milestoneId: string): string {
+	const milestone = featuresState.milestones.find((entry) => entry.id === milestoneId);
+	if (!milestone) {
+		return "0/0 done";
+	}
+	const featureIds = new Set(milestone.featureIds);
+	const total = milestone.featureIds.length;
+	const done = featuresState.features.filter((feature) => featureIds.has(feature.id) && feature.status === "done").length;
+	return `${done}/${total} done`;
+}
+
+function getOverallMissionProgressText(featuresState: MissionFeaturesStateFile): string {
+	const doneFeatures = featuresState.features.filter((feature) => feature.status === "done").length;
+	const failedFeatures = featuresState.features.filter((feature) => feature.status === "failed").length;
+	const doneMilestones = featuresState.milestones.filter((milestone) => milestone.status === "done").length;
+	const failedMilestones = featuresState.milestones.filter((milestone) => milestone.status === "failed").length;
+	const parts = [
+		`${doneFeatures}/${featuresState.features.length} features done`,
+		`${doneMilestones}/${featuresState.milestones.length} milestones done`,
+	];
+	if (failedFeatures > 0) {
+		parts.push(`${failedFeatures} feature${failedFeatures === 1 ? "" : "s"} failed`);
+	}
+	if (failedMilestones > 0) {
+		parts.push(`${failedMilestones} milestone${failedMilestones === 1 ? "" : "s"} failed`);
+	}
+	return parts.join(" · ");
+}
+
+function getMilestoneStatusText(theme: OrchTheme, status: MissionFeatureStateStatus): string {
+	switch (status) {
+		case "done":
+			return `${theme.fg("success", GLYPHS.pass)} ${theme.fg("success", "passed")}`;
+		case "failed":
+			return `${theme.fg("error", GLYPHS.fail)} ${theme.fg("error", "failed")}`;
+		case "in-progress":
+			return `${theme.fg("accent", GLYPHS.inProgress)} ${theme.fg("accent", "running")}`;
+		default:
+			return `${theme.fg("dim", GLYPHS.pending)} ${theme.fg("dim", "pending")}`;
+	}
+}
+
+function formatFeatureProgress(theme: OrchTheme, feature: MissionFeatureStateEntryLike, mission: OrchActiveMission): string {
+	const statusGlyph = getFeatureSymbol(feature.status);
+	let statusText = "pending";
+	if (feature.status === "done") {
+		statusText = `${GLYPHS.pass} passed`;
+	} else if (feature.status === "failed") {
+		statusText = `${GLYPHS.fail} failed`;
+	} else if (feature.status === "in-progress") {
+		const liveState = mission.liveState;
+		if (liveState?.currentFeatureId === feature.id) {
+			statusText = liveState.phase.startsWith("validating ") ? `${GLYPHS.inProgress} validating` : `running worker${GLYPHS.ellipsis}`;
+		} else {
+			statusText = feature.attempts > 1 ? `running · attempt ${feature.attempts}` : "running";
+		}
+	}
+
+	const line = `${statusGlyph} ${feature.title} — ${statusText}`;
+	return theme.fg(getFeatureColor(feature.status), line);
+}
+
+type MissionFeatureStateEntryLike = {
+	id: string;
+	title: string;
+	status: MissionFeatureStateStatus;
+	attempts: number;
+};
 
 function getLastOrchestratorLine(mission: OrchActiveMission): string {
 	const textLine = getLastMeaningfulLine(mission.orchestratorText);
@@ -1620,10 +1709,6 @@ function getFeatureColor(status: MissionFeatureStateStatus): MissionProgressColo
 	return FEATURE_STATUS_COLORS[status];
 }
 
-function getMilestoneColor(status: MissionFeatureStateStatus): MissionProgressColor {
-	return MILESTONE_STATUS_COLORS[status];
-}
-
 function appendStreamChunk(current: string, delta: string): string {
 	const next = `${current}${delta}`;
 	return next.length <= MAX_STREAM_CHARS ? next : next.slice(next.length - MAX_STREAM_CHARS);
@@ -1643,7 +1728,7 @@ function truncateInlineText(value: string, maxLength: number): string {
 	if (singleLine.length <= maxLength) {
 		return singleLine;
 	}
-	return `${singleLine.slice(0, maxLength - 3)}...`;
+	return `${singleLine.slice(0, maxLength - 3)}${GLYPHS.ellipsis}`;
 }
 
 async function readMissionFeaturesStateFromFile(path: string): Promise<MissionFeaturesStateFile> {
@@ -1680,6 +1765,26 @@ function reportMissionEvent(
 
 	const block = [`[${title}]`, body].filter((value) => value.trim().length > 0).join("\n");
 	process.stdout.write(`${block}\n`);
+}
+
+function emitMissionRecap(pi: ExtensionAPI, ctx: ExtensionCommandContext, content: string): void {
+	const recapContent = `recap: ${content}`;
+	if (ctx.hasUI) {
+		emitOrchEvent(pi, ctx, recapContent, { level: "info", recap: true });
+		return;
+	}
+	process.stdout.write(`${GLYPHS.recap} ${recapContent}\n`);
+}
+
+function emitWorkerChanges(pi: ExtensionAPI, ctx: ExtensionCommandContext, changes: string[]): void {
+	if (changes.length === 0) {
+		return;
+	}
+	if (ctx.hasUI) {
+		emitOrchEvent(pi, ctx, "", { level: "info", workerChanges: changes });
+		return;
+	}
+	process.stdout.write(["Worker changes:", ...changes.map((change) => `- ${change}`)].join("\n") + "\n");
 }
 
 function shouldDisplayMissionEventInUi(level: OrchEventLevel, phase: string): boolean {

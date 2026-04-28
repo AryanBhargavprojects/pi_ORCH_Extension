@@ -189,7 +189,7 @@ export function formatRuntimeSummary(state: OrchRuntimeState, cwd: string): stri
 	if (state.configState) {
 		const { merged, project, resolvedPaths, user, warnings } = state.configState;
 		lines.push(
-			`roles: orchestrator=${merged.roles.orchestrator.provider}/${merged.roles.orchestrator.model}, worker=${merged.roles.worker.provider}/${merged.roles.worker.model}, validator=${merged.roles.validator.provider}/${merged.roles.validator.model}`,
+			`roles: orchestrator=${merged.roles.orchestrator.provider}/${merged.roles.orchestrator.model}, worker=${merged.roles.worker.provider}/${merged.roles.worker.model}, validator=${merged.roles.validator.provider}/${merged.roles.validator.model}, smart_friend=${merged.roles.smart_friend.provider}/${merged.roles.smart_friend.model}`,
 		);
 		lines.push(
 			`tokenThresholds: learningExtraction=${merged.tokenThresholds.learningExtraction}, contextWarning=${merged.tokenThresholds.contextWarning}`,

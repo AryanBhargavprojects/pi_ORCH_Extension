@@ -1,7 +1,13 @@
+import { homedir } from "node:os";
+import { join, resolve, sep } from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { Api, AssistantMessage, Model, TextContent } from "@mariozechner/pi-ai";
 import {
 	createAgentSession,
+	createFindToolDefinition,
+	createGrepToolDefinition,
+	createLsToolDefinition,
+	createReadToolDefinition,
 	DefaultResourceLoader,
 	getAgentDir,
 	ModelRegistry,
@@ -31,6 +37,12 @@ export type OrchSubagentStreamEvent =
 		role: OrchRoleName;
 		type: "thinking_delta" | "text_delta";
 		delta: string;
+	  }
+	| {
+		role: OrchRoleName;
+		type: "tool_call";
+		label: string;
+		detail: string;
 	  };
 
 export type OrchSubagentRequest = {
@@ -88,7 +100,9 @@ export type OrchValidatorSubagentRequest = {
 
 const ORCHESTRATOR_TOOLS = ["read", "bash", "grep", "find", "ls"];
 const WORKER_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
-const VALIDATOR_TOOLS = ["read", "bash", "grep", "find", "ls"];
+const VALIDATOR_TOOLS = ["read", "grep", "find", "ls"];
+const SMART_FRIEND_TOOLS = ["read", "bash", "grep", "find", "ls"];
+const VALIDATOR_STREAMS_DIR_NAME = ".streams";
 
 export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<OrchSubagentResult> {
 	const modelConfig = request.configState.merged.roles[request.role];
@@ -115,11 +129,30 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 		modelRegistry: request.modelRegistry,
 		resourceLoader,
 		tools: getRoleTools(request.role),
+		customTools: getRoleToolOverrides(request),
 		sessionManager: SessionManager.inMemory(request.cwd),
 		settingsManager,
 	});
 
+	const toolArgsById = new Map<string, { toolName: string; args: unknown }>();
 	const unsubscribe = session.subscribe((event) => {
+		if (event.type === "tool_execution_start") {
+			toolArgsById.set(event.toolCallId, { toolName: event.toolName, args: event.args });
+			return;
+		}
+
+		if (event.type === "tool_execution_end") {
+			const started = toolArgsById.get(event.toolCallId);
+			toolArgsById.delete(event.toolCallId);
+			request.onStreamEvent?.({
+				role: request.role,
+				type: "tool_call",
+				label: formatSubagentToolLabel(event.toolName),
+				detail: formatSubagentToolDetail(event.toolName, started?.args, event.result, event.isError),
+			});
+			return;
+		}
+
 		if (event.type !== "message_update") {
 			return;
 		}
@@ -236,7 +269,339 @@ function getRoleTools(role: OrchRoleName): string[] {
 			return WORKER_TOOLS;
 		case "validator":
 			return VALIDATOR_TOOLS;
+		case "smart_friend":
+			return SMART_FRIEND_TOOLS;
 	}
+}
+
+function formatSubagentToolLabel(toolName: string): string {
+	switch (toolName) {
+		case "read":
+			return "Read";
+		case "bash":
+			return "Bash";
+		case "edit":
+			return "Edit";
+		case "write":
+			return "Write";
+		case "grep":
+			return "Search";
+		case "find":
+			return "Find";
+		case "ls":
+			return "List";
+		default:
+			return toolName.length > 0 ? `${toolName.slice(0, 1).toUpperCase()}${toolName.slice(1)}` : "Tool";
+	}
+}
+
+function formatSubagentToolDetail(toolName: string, args: unknown, result: unknown, isError: boolean): string {
+	const input = asRecord(args);
+	const resultRecord = asRecord(result);
+	const details = asRecord(resultRecord?.details);
+	const output = getToolResultText(resultRecord);
+	const statusPrefix = isError ? "failed" : "done";
+
+	switch (toolName) {
+		case "read": {
+			const path = asString(input?.path) ?? "file";
+			const lines = asNumber(asRecord(details?.truncation)?.totalLines) ?? countMeaningfulLines(output);
+			return `${path} • ${lines} ${lines === 1 ? "line" : "lines"}`;
+		}
+		case "bash": {
+			const command = truncateOneLine(asString(input?.command) ?? "command", 80);
+			const summary = output.length > 0 ? truncateOneLine(getFirstMeaningfulLine(output) ?? output, 80) : statusPrefix;
+			return `${command} • ${summary}`;
+		}
+		case "edit": {
+			const path = asString(input?.path) ?? "file";
+			const editCount = Array.isArray(input?.edits) ? input.edits.length : 1;
+			const diffStats = countDiffStats(asString(details?.diff) ?? "");
+			return `${path} • Applied ${editCount} ${editCount === 1 ? "edit" : "edits"} • +${diffStats.additions}/-${diffStats.removals}`;
+		}
+		case "write": {
+			const path = asString(input?.path) ?? "file";
+			const lineCount = countLines(asString(input?.content) ?? output);
+			return `${path} • wrote ${lineCount} ${lineCount === 1 ? "line" : "lines"}`;
+		}
+		case "grep":
+		case "find":
+		case "ls": {
+			const target = asString(input?.path) ?? asString(input?.pattern) ?? ".";
+			const count = countMeaningfulLines(output);
+			return `${target} • ${count} ${count === 1 ? "result" : "results"}`;
+		}
+		default:
+			return output.length > 0 ? truncateOneLine(getFirstMeaningfulLine(output) ?? output, 100) : statusPrefix;
+	}
+}
+
+function getToolResultText(result: Record<string, unknown> | undefined): string {
+	const content = result?.content;
+	if (!Array.isArray(content)) {
+		return "";
+	}
+	return getTextToolOutput(content as Array<{ type: string; text?: string }>);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function asString(value: unknown): string | undefined {
+	return typeof value === "string" ? value : undefined;
+}
+
+function asNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function countLines(text: string): number {
+	if (text.length === 0) {
+		return 0;
+	}
+	return text.replace(/\r/g, "").split("\n").length;
+}
+
+function countMeaningfulLines(text: string): number {
+	return text
+		.replace(/\r/g, "")
+		.split("\n")
+		.filter((line) => line.trim().length > 0).length;
+}
+
+function getFirstMeaningfulLine(text: string): string | undefined {
+	return text
+		.replace(/\r/g, "")
+		.split("\n")
+		.map((line) => line.trim())
+		.find((line) => line.length > 0);
+}
+
+function countDiffStats(diff: string): { additions: number; removals: number } {
+	let additions = 0;
+	let removals = 0;
+	for (const line of diff.split("\n")) {
+		if (line.startsWith("+") && !line.startsWith("+++")) {
+			additions++;
+		}
+		if (line.startsWith("-") && !line.startsWith("---")) {
+			removals++;
+		}
+	}
+	return { additions, removals };
+}
+
+function truncateOneLine(value: string, maxLength: number): string {
+	const singleLine = value.replace(/\s+/g, " ").trim();
+	if (singleLine.length <= maxLength) {
+		return singleLine;
+	}
+	return `${singleLine.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+function getRoleToolOverrides(request: OrchSubagentRequest) {
+	if (request.role !== "validator") {
+		return [];
+	}
+
+	const blockedRoots = getValidatorBlockedRoots(request.configState);
+	const readTool = createReadToolDefinition(request.cwd);
+	const grepTool = createGrepToolDefinition(request.cwd);
+	const findTool = createFindToolDefinition(request.cwd);
+	const lsTool = createLsToolDefinition(request.cwd);
+
+	return [
+		{
+			...readTool,
+			async execute(toolCallId, params, signal, onUpdate, ctx) {
+				assertValidatorPathAllowed(params.path, request.cwd, blockedRoots);
+				return readTool.execute(toolCallId, params, signal, onUpdate, ctx);
+			},
+		},
+		{
+			...grepTool,
+			async execute(toolCallId, params, signal, onUpdate, ctx) {
+				const searchPath = resolveValidatorToolPath(request.cwd, params.path ?? ".");
+				assertValidatorAbsolutePathAllowed(searchPath, blockedRoots);
+				const result = await grepTool.execute(toolCallId, params, signal, onUpdate, ctx);
+				const filtered = filterGrepOutput(getTextToolOutput(result.content), searchPath, blockedRoots);
+				if (!filtered.changed) {
+					return result;
+				}
+				return {
+					...result,
+					content: [{ type: "text", text: filtered.text }] satisfies TextContent[],
+					details: undefined,
+				};
+			},
+		},
+		{
+			...findTool,
+			async execute(toolCallId, params, signal, onUpdate, ctx) {
+				const searchPath = resolveValidatorToolPath(request.cwd, params.path ?? ".");
+				assertValidatorAbsolutePathAllowed(searchPath, blockedRoots);
+				const result = await findTool.execute(toolCallId, params, signal, onUpdate, ctx);
+				const filtered = filterFindOutput(getTextToolOutput(result.content), searchPath, blockedRoots);
+				if (!filtered.changed) {
+					return result;
+				}
+				return {
+					...result,
+					content: [{ type: "text", text: filtered.text }] satisfies TextContent[],
+					details: undefined,
+				};
+			},
+		},
+		{
+			...lsTool,
+			async execute(toolCallId, params, signal, onUpdate, ctx) {
+				const searchPath = resolveValidatorToolPath(request.cwd, params.path ?? ".");
+				assertValidatorAbsolutePathAllowed(searchPath, blockedRoots);
+				const result = await lsTool.execute(toolCallId, params, signal, onUpdate, ctx);
+				const filtered = filterLsOutput(getTextToolOutput(result.content), searchPath, blockedRoots);
+				if (!filtered.changed) {
+					return result;
+				}
+				return {
+					...result,
+					content: [{ type: "text", text: filtered.text }] satisfies TextContent[],
+					details: undefined,
+				};
+			},
+		},
+	];
+}
+
+function getValidatorBlockedRoots(configState: OrchLoadedConfig): string[] {
+	return [resolve(configState.resolvedPaths.missionsDir, VALIDATOR_STREAMS_DIR_NAME)];
+}
+
+function resolveValidatorToolPath(cwd: string, path: string): string {
+	const normalized = path.startsWith("@") ? path.slice(1) : path;
+	if (normalized === "~") {
+		return homedir();
+	}
+	if (normalized.startsWith("~/")) {
+		return join(homedir(), normalized.slice(2));
+	}
+	return resolve(cwd, normalized);
+}
+
+function assertValidatorPathAllowed(path: string, cwd: string, blockedRoots: string[]): void {
+	assertValidatorAbsolutePathAllowed(resolveValidatorToolPath(cwd, path), blockedRoots);
+}
+
+function assertValidatorAbsolutePathAllowed(path: string, blockedRoots: string[]): void {
+	if (isValidatorBlockedPath(path, blockedRoots)) {
+		throw new Error(`Access denied: Orch validator cannot inspect cmux stream logs under ${path}.`);
+	}
+}
+
+function isValidatorBlockedPath(path: string, blockedRoots: string[]): boolean {
+	const absolutePath = resolve(path);
+	return blockedRoots.some((root) => absolutePath === root || absolutePath.startsWith(`${root}${sep}`));
+}
+
+function getTextToolOutput(content: Array<{ type: string; text?: string }>): string {
+	return content
+		.filter((item): item is TextContent => item.type === "text")
+		.map((item) => item.text)
+		.join("\n")
+		.trim();
+}
+
+function filterLsOutput(
+	output: string,
+	listedDirectory: string,
+	blockedRoots: string[],
+): { changed: boolean; text: string } {
+	if (output.length === 0 || output === "(empty directory)") {
+		return { changed: false, text: output };
+	}
+
+	const entries = output
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0 && !line.startsWith("["));
+	const visibleEntries = entries.filter((entry) => {
+		const entryPath = resolve(listedDirectory, entry.endsWith("/") ? entry.slice(0, -1) : entry);
+		return !isValidatorBlockedPath(entryPath, blockedRoots);
+	});
+
+	return {
+		changed: visibleEntries.length !== entries.length,
+		text: visibleEntries.length > 0 ? visibleEntries.join("\n") : "(empty directory)",
+	};
+}
+
+function filterFindOutput(output: string, searchPath: string, blockedRoots: string[]): { changed: boolean; text: string } {
+	if (output.length === 0 || output === "No files found matching pattern") {
+		return { changed: false, text: output };
+	}
+
+	const paths = output
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0 && !line.startsWith("["));
+	const visiblePaths = paths.filter((line) => !isValidatorBlockedPath(resolve(searchPath, line), blockedRoots));
+
+	return {
+		changed: visiblePaths.length !== paths.length,
+		text: visiblePaths.length > 0 ? visiblePaths.join("\n") : "No files found matching pattern",
+	};
+}
+
+function filterGrepOutput(output: string, searchPath: string, blockedRoots: string[]): { changed: boolean; text: string } {
+	if (output.length === 0 || output === "No matches found") {
+		return { changed: false, text: output };
+	}
+
+	const keptLines: string[] = [];
+	let changed = false;
+	for (const line of output.split("\n")) {
+		const trimmed = line.trim();
+		if (trimmed.length === 0) {
+			if (keptLines.length > 0 && keptLines[keptLines.length - 1] !== "") {
+				keptLines.push("");
+			}
+			continue;
+		}
+		if (trimmed.startsWith("[")) {
+			continue;
+		}
+
+		const resultPath = extractGrepResultPath(trimmed);
+		if (resultPath && isValidatorBlockedPath(resolve(searchPath, resultPath), blockedRoots)) {
+			changed = true;
+			continue;
+		}
+
+		keptLines.push(line);
+	}
+
+	const normalizedLines = trimBlankLines(keptLines);
+	return {
+		changed,
+		text: normalizedLines.length > 0 ? normalizedLines.join("\n") : "No matches found",
+	};
+}
+
+function extractGrepResultPath(line: string): string | undefined {
+	const match = line.match(/^(.*?)(?::\d+:|-\d+- )/);
+	return match?.[1];
+}
+
+function trimBlankLines(lines: string[]): string[] {
+	let start = 0;
+	let end = lines.length;
+	while (start < end && lines[start] === "") {
+		start++;
+	}
+	while (end > start && lines[end - 1] === "") {
+		end--;
+	}
+	return lines.slice(start, end);
 }
 
 function buildWorkerSubagentPrompt(request: OrchWorkerSubagentRequest): string {
@@ -307,8 +672,7 @@ function buildValidatorSubagentPrompt(request: OrchValidatorSubagentRequest): st
 		...(request.workerRun.testsRun.length > 0 ? request.workerRun.testsRun.map((test) => `- ${test}`) : ["- none"]),
 		"Worker notes:",
 		...(request.workerRun.notes.length > 0 ? request.workerRun.notes.map((note) => `- ${note}`) : ["- none"]),
-		"Inspect the repository and determine whether this feature is complete. Never modify project source files.",
-		"You may append observations to the shared mission knowledge base if that helps later agents avoid repeated mistakes.",
+		"Inspect the repository and determine whether this feature is complete. Never modify files or shared mission-state artifacts.",
 		"Return strict JSON only with this shape:",
 		'{ "passed": true, "summary": "string", "issues": [{ "severity": "critical|major|minor", "title": "string", "details": "string", "action": "string" }], "evidence": ["string"] }',
 	].join("\n");

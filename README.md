@@ -6,25 +6,42 @@ It adds:
 
 - interactive orchestrator behavior during normal chat
 - fresh-context sub-agents via `orch_delegate`
+- orchestrator-only advisor guidance via `orch_smart_friend`
 - autonomous mission mode via `/mission`
 - an Orch control surface via `/orch` and `/orch-model`
 - custom footer, mission widgets, and compact tool rendering
 
 ## Install
 
-Install from npm:
+### Global install
+
+Install Orch once and use it from any directory:
 
 ```bash
 pi install npm:pi-orch-extension
 ```
 
-Install from GitHub:
+Or install directly from GitHub:
 
 ```bash
 pi install git:github.com/AryanBhargavprojects/pi_ORCH_Extension
 ```
 
-Try it without installing globally:
+Pi writes global installs to `~/.pi/agent/settings.json`, so Orch loads in every project on this machine.
+
+Verify the package is installed:
+
+```bash
+pi list
+```
+
+If Pi is already running, reload it:
+
+```bash
+/reload
+```
+
+### One-off try without installing globally
 
 ```bash
 pi -e npm:pi-orch-extension
@@ -48,7 +65,7 @@ That lets you iterate in-place and reload with `/reload`.
 - `model-command.ts` - `/orch-model` sub-agent model selector and persistence
 - `config.ts` - Orch config schema, defaults, validation, load/save helpers
 - `cmux-streaming.ts` - caller-anchored cmux worker/validator split-pane setup and raw role stream tailing
-- `interactive.ts` - default interactive orchestrator behavior and `orch_delegate`
+- `interactive.ts` - default interactive orchestrator behavior plus `orch_delegate` and `orch_smart_friend`
 - `mission.ts` - autonomous `/mission` loop, planning, milestones, validation, fix-task steering, and the live mission block UI
 - `mission-state.ts` - live mission state directory I/O, state snapshots, feature status tracking
 - `mission-types.ts` - shared mission, milestone, fix-task, and state types
@@ -58,6 +75,7 @@ That lets you iterate in-place and reload with `/reload`.
 - `prompts/orchestrator.md` - orchestrator system prompt
 - `prompts/worker.md` - worker system prompt
 - `prompts/validator.md` - validator system prompt
+- `prompts/smart-friend.md` - smart friend advisor system prompt
 - `role-runner.ts` - fresh-session Orch subagent spawner plus worker/validator wrappers
 - `runtime.ts` - runtime state plus footer/mission status helpers
 - `constants.ts` - shared metadata and command names
@@ -116,14 +134,15 @@ Mascot behavior:
 - `validator` during validation phases
 - `success`, `error`, and `interrupted` as short transient reactions
 
-Additional custom tool:
+Additional custom tools:
 
 - `orch_delegate` - run a fresh Orch role session with:
   - `orchestrator`
   - `worker`
   - `validator`
+- `orch_smart_friend` - ask a fresh read-only advisor for a second opinion when the orchestrator is stuck
 
-This gives the main conversational agent a way to delegate focused sub-tasks using the role-specific models from Orch config.
+This gives the main conversational agent a way to delegate focused sub-tasks using the role-specific models from Orch config, and to consult a stronger read-only advisor when needed.
 
 ## Sub-agent model configuration
 
@@ -139,6 +158,7 @@ Behavior:
   - `orchestrator`
   - `worker`
   - `validator`
+  - `smart_friend`
 - lets the user choose which config scope to write to:
   - project scope
   - user scope
@@ -285,7 +305,8 @@ Project config overrides user config.
   "roles": {
     "orchestrator": { "provider": "anthropic", "model": "claude-opus-4-5" },
     "worker": { "provider": "anthropic", "model": "claude-sonnet-4-5" },
-    "validator": { "provider": "anthropic", "model": "claude-sonnet-4-5" }
+    "validator": { "provider": "anthropic", "model": "claude-sonnet-4-5" },
+    "smart_friend": { "provider": "anthropic", "model": "claude-opus-4-7" }
   },
   "tokenThresholds": {
     "learningExtraction": 100000,
@@ -316,6 +337,7 @@ Files:
 - `prompts/orchestrator.md`
 - `prompts/worker.md`
 - `prompts/validator.md`
+- `prompts/smart-friend.md`
 
 The interactive orchestrator prompt and fresh sub-agent sessions load from these files.
 
