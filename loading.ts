@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { type Component, truncateToWidth, type TUI } from "@mariozechner/pi-tui";
 
-import { GLYPHS, ORCH_CUSTOM_TYPES, ORCH_WIDGET_IDS } from "./constants.js";
+import { GLYPHS, ORCH_WIDGET_IDS } from "./constants.js";
 
 export const LOADING_VERBS: Array<[string, string]> = [
 	["Brewing", "Brewed"],
@@ -103,18 +103,7 @@ export function renderLoadingLine(elapsed: number, startVerbIndex: number, theme
 	].join("");
 }
 
-export function renderCompletionLine(elapsed: number, verbIndex: number, theme: LoadingTheme): string {
-	const past = LOADING_VERBS[verbIndex]?.[1] ?? LOADING_VERBS[0][1];
-	return [
-		theme.fg("dim", GLYPHS.spinner[0]),
-		" ",
-		theme.fg("dim", `${past} for ${formatElapsed(elapsed)}`),
-	].join("");
-}
-
 export function registerOrchLoadingIndicator(pi: ExtensionAPI): void {
-	let activeTurn: { startedAt: number; startVerbIndex: number } | undefined;
-
 	pi.on("turn_start", async (_event, ctx) => {
 		if (!ctx.hasUI) {
 			return;
@@ -122,7 +111,6 @@ export function registerOrchLoadingIndicator(pi: ExtensionAPI): void {
 
 		const startedAt = Date.now();
 		const startVerbIndex = Math.floor(Math.random() * LOADING_VERBS.length);
-		activeTurn = { startedAt, startVerbIndex };
 		ctx.ui.setWidget(
 			ORCH_WIDGET_IDS.loadingIndicator,
 			(tui, theme) => new OrchLoadingComponent(tui, theme, startedAt, startVerbIndex),
@@ -131,37 +119,13 @@ export function registerOrchLoadingIndicator(pi: ExtensionAPI): void {
 	});
 
 	pi.on("turn_end", async (_event, ctx) => {
-		const currentTurn = activeTurn;
-		activeTurn = undefined;
 		if (!ctx.hasUI) {
 			return;
 		}
-
-		if (currentTurn) {
-			const elapsedMs = Date.now() - currentTurn.startedAt;
-			const verbIndex = getLoadingVerbIndex(elapsedMs, currentTurn.startVerbIndex);
-			pi.sendMessage(
-				{
-					customType: ORCH_CUSTOM_TYPES.event,
-					content: "",
-					display: true,
-					details: {
-						level: "info",
-						loadingCompletion: {
-							elapsedMs,
-							verbIndex,
-						},
-					},
-				},
-				{ triggerTurn: false },
-			);
-		}
-
 		ctx.ui.setWidget(ORCH_WIDGET_IDS.loadingIndicator, undefined);
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
-		activeTurn = undefined;
 		if (!ctx.hasUI) {
 			return;
 		}

@@ -1,6 +1,6 @@
 export const ORCH_EXTENSION_ID = "orch";
 export const ORCH_EXTENSION_NAME = "Orch";
-export const ORCH_EXTENSION_VERSION = "0.2.0";
+export const ORCH_EXTENSION_VERSION = "0.2.1";
 
 export const ORCH_COMMANDS = {
 	main: "orch",

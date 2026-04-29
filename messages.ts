@@ -2,7 +2,6 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@m
 import { Text } from "@mariozechner/pi-tui";
 
 import { GLYPHS, ORCH_CUSTOM_TYPES } from "./constants.js";
-import { renderCompletionLine } from "./loading.js";
 
 export type OrchEventLevel = "info" | "success" | "warning" | "error";
 
@@ -11,10 +10,6 @@ export type OrchEventDetails = {
 	phase?: string;
 	title?: string;
 	recap?: boolean;
-	loadingCompletion?: {
-		elapsedMs: number;
-		verbIndex: number;
-	};
 	workerChanges?: string[];
 };
 
@@ -22,10 +17,6 @@ export function registerOrchMessageRenderer(pi: ExtensionAPI): void {
 	pi.registerMessageRenderer(ORCH_CUSTOM_TYPES.event, (message, _options, theme) => {
 		const details = (message.details ?? {}) as OrchEventDetails;
 		const content = typeof message.content === "string" ? message.content : String(message.content ?? "");
-
-		if (details.loadingCompletion) {
-			return new Text(renderCompletionLine(details.loadingCompletion.elapsedMs, details.loadingCompletion.verbIndex, theme), 0, 0);
-		}
 
 		if (details.recap) {
 			return new Text(theme.fg("dim", `${GLYPHS.recap} ${content}`), 0, 0);

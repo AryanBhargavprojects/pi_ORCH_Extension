@@ -11,6 +11,10 @@
     "validator": {
       "provider": "openai-codex",
       "model": "gpt-5.4-mini"
+    },
+    "smart_friend": {
+      "provider": "openai-codex",
+      "model": "gpt-5.5"
     }
   }
 }
