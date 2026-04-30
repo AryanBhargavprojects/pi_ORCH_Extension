@@ -4,6 +4,7 @@ import { loadOrchConfig } from "./config.js";
 import { ORCH_WIDGET_IDS } from "./constants.js";
 import { registerOrchCommands } from "./commands.js";
 import { registerOrchFooter } from "./footer.js";
+import { registerImagePasteAttachments } from "./image-paste.js";
 import { registerInteractiveOrch } from "./interactive.js";
 import { registerMissionCommand } from "./mission.js";
 import { registerOrchMessageRenderer } from "./messages.js";
@@ -21,6 +22,7 @@ export default function orchExtension(pi: ExtensionAPI): void {
 	registerOrchCommands(pi, runtimeState);
 	registerOrchFooter(pi, runtimeState);
 	registerOrchModelCommand(pi, runtimeState);
+	registerImagePasteAttachments(pi);
 	registerMissionCommand(pi, runtimeState);
 	registerInteractiveOrch(pi, runtimeState);
 

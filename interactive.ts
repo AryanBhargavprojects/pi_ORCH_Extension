@@ -21,14 +21,15 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 	pi.registerTool({
 		name: ORCH_TOOL_NAMES.delegate,
 		label: "Orch Delegate",
-		description: "Run a fresh Orch sub-agent with the configured orchestrator, worker, or validator model.",
-		promptSnippet: "Delegate focused planning, implementation, or validation work to a fresh Orch role session.",
+		description: "Run a fresh Orch sub-agent with the configured worker or validator model.",
+		promptSnippet: "Delegate focused implementation or validation work to a fresh Orch role session.",
 		promptGuidelines: [
-			"Use orch_delegate when you need a fresh Orch orchestrator, worker, or validator with isolated context.",
+			"Use orch_delegate when you need a fresh Orch worker or validator with isolated context.",
+			"Do not delegate orchestration through orch_delegate; the main chat agent remains the orchestrator in interactive mode.",
 			"When delegating, include the relevant file paths, constraints, and expected output in the task itself because the sub-agent starts fresh.",
 		],
 		parameters: Type.Object({
-			role: StringEnum(["orchestrator", "worker", "validator"] as const, {
+			role: StringEnum(["worker", "validator"] as const, {
 				description: "Which Orch role to run in a fresh context",
 			}),
 			task: Type.String({ description: "Self-contained task for the selected Orch role" }),

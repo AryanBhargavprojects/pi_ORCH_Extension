@@ -111,10 +111,10 @@ export function registerOrchLoadingIndicator(pi: ExtensionAPI): void {
 
 		const startedAt = Date.now();
 		const startVerbIndex = Math.floor(Math.random() * LOADING_VERBS.length);
+		ctx.ui.setWorkingVisible(false);
 		ctx.ui.setWidget(
 			ORCH_WIDGET_IDS.loadingIndicator,
 			(tui, theme) => new OrchLoadingComponent(tui, theme, startedAt, startVerbIndex),
-			{ placement: "belowEditor" },
 		);
 	});
 
@@ -122,6 +122,7 @@ export function registerOrchLoadingIndicator(pi: ExtensionAPI): void {
 		if (!ctx.hasUI) {
 			return;
 		}
+		ctx.ui.setWorkingVisible(true);
 		ctx.ui.setWidget(ORCH_WIDGET_IDS.loadingIndicator, undefined);
 	});
 
@@ -129,6 +130,7 @@ export function registerOrchLoadingIndicator(pi: ExtensionAPI): void {
 		if (!ctx.hasUI) {
 			return;
 		}
+		ctx.ui.setWorkingVisible(true);
 		ctx.ui.setWidget(ORCH_WIDGET_IDS.loadingIndicator, undefined);
 	});
 }
