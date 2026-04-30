@@ -1,10 +1,11 @@
 import { join } from "node:path";
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { type Component, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { type Component, truncateToWidth, type TUI, visibleWidth } from "@mariozechner/pi-tui";
 
 import { loadOrchConfig, type OrchLoadedConfig } from "./config.js";
 import { GLYPHS, ORCH_COMMANDS, ORCH_WIDGET_IDS } from "./constants.js";
+import { formatElapsed, SPINNER_FRAME_MS } from "./loading.js";
 import { emitOrchEvent, type OrchEventLevel } from "./messages.js";
 import type { PlanClarificationResult, PlanPhase, PlanResult } from "./plan-types.js";
 import {
@@ -15,7 +16,7 @@ import {
 	writePlanArtifact,
 	type PlanStatePaths,
 } from "./plan-state.js";
-import { spawnOrchSubagent } from "./role-runner.js";
+import { spawnOrchSubagent, type OrchSubagentStreamEvent } from "./role-runner.js";
 import { setOrchStatus, type OrchActivePlan, type OrchRuntimeState } from "./runtime.js";
 import { formatErrorMessage } from "./utils.js";
 
@@ -136,7 +137,7 @@ async function handlePlanStatus(ctx: ExtensionCommandContext, state: OrchRuntime
 		return;
 	}
 
-	let statusText = `Active plan: ${plan.goal}\nPhase: ${plan.phase}\nStarted: ${plan.startedAt}`;
+	let statusText = `Active plan: ${plan.goal}\nPhase: ${plan.phase}\nAgent: ${plan.currentAgent}\nLast activity: ${plan.lastActivity}\nStarted: ${plan.startedAt}`;
 	if (plan.stateFilePath) {
 		try {
 			const planState = await readPlanState(plan.stateFilePath);
@@ -199,6 +200,10 @@ function startPlanInBackground(
 		refinedGoal: goal,
 		startedAt,
 		phase: "clarifying",
+		phaseStartedAt: Date.now(),
+		currentAgent: PLAN_AGENT_LABELS.clarifying,
+		lastActivity: "Starting Plan Mode",
+		lastActivityAt: Date.now(),
 		abortController: new AbortController(),
 		stateDir: join(plansDir, planId),
 		stateFilePath: join(plansDir, planId, "state.json"),
@@ -260,7 +265,7 @@ async function runPlanWorkflow(
 		await writeBrief(paths, goal, null, [], undefined);
 		checkAborted(signal);
 
-		const clarifierResult = await runClarifierPass(goal, ctx.cwd, configState, ctx.modelRegistry, signal);
+		const clarifierResult = await runClarifierPass(goal, ctx.cwd, configState, ctx.modelRegistry, ctx, state, signal);
 		let questions: string[] = [];
 		let assumptions: string[] = [];
 
@@ -310,7 +315,7 @@ async function runPlanWorkflow(
 		await persistPlanPhase(paths, ctx, state, "researching-codebase", refinedGoal);
 		reportPlanEvent(pi, ctx, "Researching codebase", `Analyzing codebase for: ${refinedGoal}`, "info");
 
-		const codebaseAnalysis = await runCodebaseAnalysis(planningContext, ctx.cwd, configState, ctx.modelRegistry, signal);
+		const codebaseAnalysis = await runCodebaseAnalysis(planningContext, ctx.cwd, configState, ctx.modelRegistry, ctx, state, signal);
 		await writePlanArtifact(paths.codebaseAnalysisFile, codebaseAnalysis || "# Codebase Analysis\n\nNo structured analysis returned.");
 		checkAborted(signal);
 
@@ -318,7 +323,7 @@ async function runPlanWorkflow(
 		await persistPlanPhase(paths, ctx, state, "researching-docs", refinedGoal);
 		reportPlanEvent(pi, ctx, "Researching docs/web", `Researching documentation and web resources for: ${refinedGoal}`, "info");
 
-		const docsResearch = await runDocsResearch(planningContext, codebaseAnalysis, ctx.cwd, configState, ctx.modelRegistry, signal);
+		const docsResearch = await runDocsResearch(planningContext, codebaseAnalysis, ctx.cwd, configState, ctx.modelRegistry, ctx, state, signal);
 		await writePlanArtifact(paths.docsWebResearchFile, docsResearch || "# Docs/Web Research\n\nNo structured research returned.");
 		checkAborted(signal);
 
@@ -326,7 +331,7 @@ async function runPlanWorkflow(
 		await persistPlanPhase(paths, ctx, state, "assessing-feasibility", refinedGoal);
 		reportPlanEvent(pi, ctx, "Assessing feasibility", `Evaluating feasibility for: ${refinedGoal}`, "info");
 
-		const feasibility = await runFeasibilityPass(planningContext, codebaseAnalysis, docsResearch, ctx.cwd, configState, ctx.modelRegistry, signal);
+		const feasibility = await runFeasibilityPass(planningContext, codebaseAnalysis, docsResearch, ctx.cwd, configState, ctx.modelRegistry, ctx, state, signal);
 		await writePlanArtifact(paths.feasibilityFile, feasibility || "# Feasibility\n\nNo feasibility assessment returned.");
 		checkAborted(signal);
 
@@ -334,7 +339,7 @@ async function runPlanWorkflow(
 		await persistPlanPhase(paths, ctx, state, "synthesizing", refinedGoal);
 		reportPlanEvent(pi, ctx, "Synthesizing plan", `Creating final plan and validation contract for: ${refinedGoal}`, "info");
 
-		const synthesis = await runSynthesisPass(planningContext, codebaseAnalysis, docsResearch, feasibility, ctx.cwd, configState, ctx.modelRegistry, signal);
+		const synthesis = await runSynthesisPass(planningContext, codebaseAnalysis, docsResearch, feasibility, ctx.cwd, configState, ctx.modelRegistry, ctx, state, signal);
 
 		const planMd = synthesis.plan || "# Plan\n\nNo structured plan was generated.";
 		const validationMd = synthesis.validationContract || "# Validation Contract\n\nNo validation contract was generated.";
@@ -371,6 +376,8 @@ async function runClarifierPass(
 	cwd: string,
 	configState: OrchLoadedConfig,
 	modelRegistry: PlanModelRegistry,
+	ctx: PlanContext,
+	state: OrchRuntimeState,
 	signal?: AbortSignal,
 ): Promise<PlanClarificationResult | null> {
 	const prompt = [
@@ -387,7 +394,7 @@ async function runClarifierPass(
 	].join("\n");
 
 	const result = await spawnOrchSubagent({
-		role: "orchestrator",
+		role: "plan_clarifier",
 		prompt,
 		cwd,
 		configState,
@@ -396,6 +403,7 @@ async function runClarifierPass(
 		toolNames: PLAN_RESEARCH_TOOLS,
 		bashCommandGuard: isPlanSafeBashCommand,
 		bashGuardReason: PLAN_BASH_GUARD_REASON,
+		onStreamEvent: (event) => handlePlanSubagentStreamEvent(ctx, state, event, PLAN_AGENT_LABELS.clarifying),
 	});
 
 	return normalizeClarificationResult(result.output);
@@ -406,6 +414,8 @@ async function runCodebaseAnalysis(
 	cwd: string,
 	configState: OrchLoadedConfig,
 	modelRegistry: PlanModelRegistry,
+	ctx: PlanContext,
+	state: OrchRuntimeState,
 	signal?: AbortSignal,
 ): Promise<string> {
 	const prompt = [
@@ -423,7 +433,7 @@ async function runCodebaseAnalysis(
 	].join("\n");
 
 	const result = await spawnOrchSubagent({
-		role: "orchestrator",
+		role: "plan_codebase",
 		prompt,
 		cwd,
 		configState,
@@ -432,6 +442,7 @@ async function runCodebaseAnalysis(
 		toolNames: PLAN_RESEARCH_TOOLS,
 		bashCommandGuard: isPlanSafeBashCommand,
 		bashGuardReason: PLAN_BASH_GUARD_REASON,
+		onStreamEvent: (event) => handlePlanSubagentStreamEvent(ctx, state, event, PLAN_AGENT_LABELS["researching-codebase"]),
 	});
 
 	return result.output;
@@ -443,6 +454,8 @@ async function runDocsResearch(
 	cwd: string,
 	configState: OrchLoadedConfig,
 	modelRegistry: PlanModelRegistry,
+	ctx: PlanContext,
+	state: OrchRuntimeState,
 	signal?: AbortSignal,
 ): Promise<string> {
 	const analysisExcerpt = codebaseAnalysis.length > 4000 ? `${codebaseAnalysis.slice(0, 4000)}\n\n[truncated]` : codebaseAnalysis;
@@ -467,7 +480,7 @@ async function runDocsResearch(
 	].join("\n");
 
 	const result = await spawnOrchSubagent({
-		role: "orchestrator",
+		role: "plan_researcher",
 		prompt,
 		cwd,
 		configState,
@@ -476,6 +489,7 @@ async function runDocsResearch(
 		toolNames: PLAN_RESEARCH_TOOLS,
 		bashCommandGuard: isPlanSafeBashCommand,
 		bashGuardReason: PLAN_BASH_GUARD_REASON,
+		onStreamEvent: (event) => handlePlanSubagentStreamEvent(ctx, state, event, PLAN_AGENT_LABELS["researching-docs"]),
 	});
 
 	return result.output;
@@ -488,6 +502,8 @@ async function runFeasibilityPass(
 	cwd: string,
 	configState: OrchLoadedConfig,
 	modelRegistry: PlanModelRegistry,
+	ctx: PlanContext,
+	state: OrchRuntimeState,
 	signal?: AbortSignal,
 ): Promise<string> {
 	const analysisExcerpt = codebaseAnalysis.length > 4000 ? `${codebaseAnalysis.slice(0, 4000)}\n\n[truncated]` : codebaseAnalysis;
@@ -513,7 +529,7 @@ async function runFeasibilityPass(
 	].join("\n");
 
 	const result = await spawnOrchSubagent({
-		role: "orchestrator",
+		role: "plan_feasibility",
 		prompt,
 		cwd,
 		configState,
@@ -522,6 +538,7 @@ async function runFeasibilityPass(
 		toolNames: PLAN_RESEARCH_TOOLS,
 		bashCommandGuard: isPlanSafeBashCommand,
 		bashGuardReason: PLAN_BASH_GUARD_REASON,
+		onStreamEvent: (event) => handlePlanSubagentStreamEvent(ctx, state, event, PLAN_AGENT_LABELS["assessing-feasibility"]),
 	});
 
 	return result.output;
@@ -535,6 +552,8 @@ async function runSynthesisPass(
 	cwd: string,
 	configState: OrchLoadedConfig,
 	modelRegistry: PlanModelRegistry,
+	ctx: PlanContext,
+	state: OrchRuntimeState,
 	signal?: AbortSignal,
 ): Promise<{ plan: string; validationContract: string }> {
 	const analysisExcerpt = codebaseAnalysis.length > 6000 ? `${codebaseAnalysis.slice(0, 6000)}\n\n[truncated]` : codebaseAnalysis;
@@ -564,7 +583,7 @@ async function runSynthesisPass(
 	].join("\n");
 
 	const result = await spawnOrchSubagent({
-		role: "orchestrator",
+		role: "plan_synthesizer",
 		prompt,
 		cwd,
 		configState,
@@ -573,6 +592,7 @@ async function runSynthesisPass(
 		toolNames: PLAN_RESEARCH_TOOLS,
 		bashCommandGuard: isPlanSafeBashCommand,
 		bashGuardReason: PLAN_BASH_GUARD_REASON,
+		onStreamEvent: (event) => handlePlanSubagentStreamEvent(ctx, state, event, PLAN_AGENT_LABELS.synthesizing),
 	});
 
 	return normalizeSynthesisResult(result.output);
@@ -746,6 +766,54 @@ function extractSummary(markdown: string): string {
 
 // ─── UI helpers ──────────────────────────────────────────────────────
 
+function handlePlanSubagentStreamEvent(
+	ctx: PlanContext,
+	state: OrchRuntimeState,
+	event: OrchSubagentStreamEvent,
+	agentLabel: string,
+): void {
+	const plan = state.activePlan;
+	if (!plan) {
+		return;
+	}
+
+	plan.currentAgent = agentLabel;
+	plan.lastActivityAt = Date.now();
+
+	if (event.type === "status") {
+		if (event.status === "starting") {
+			plan.lastActivity = `${agentLabel} started`;
+		} else if (event.status === "completed") {
+			plan.lastActivity = `${agentLabel} completed`;
+		} else {
+			plan.lastActivity = `${agentLabel} interrupted`;
+		}
+		updatePlanProgressWidget(ctx, state);
+		return;
+	}
+
+	if (event.type === "tool_call") {
+		plan.lastActivity = `${event.label}: ${event.detail}`;
+		updatePlanProgressWidget(ctx, state);
+		return;
+	}
+
+	if (event.type === "text_delta") {
+		const line = getLastMeaningfulLine(event.delta);
+		if (line) {
+			plan.lastActivity = line;
+		}
+		updatePlanProgressWidget(ctx, state);
+		return;
+	}
+
+	if (event.type === "thinking_delta") {
+		const line = getLastMeaningfulLine(event.delta);
+		plan.lastActivity = line ? `Thinking: ${line}` : `${agentLabel} thinking`;
+		updatePlanProgressWidget(ctx, state);
+	}
+}
+
 async function persistPlanPhase(
 	paths: PlanStatePaths,
 	ctx: PlanContext,
@@ -760,6 +828,10 @@ async function persistPlanPhase(
 function setPlanPhase(ctx: PlanContext, state: OrchRuntimeState, phase: PlanPhase): void {
 	if (state.activePlan) {
 		state.activePlan.phase = phase;
+		state.activePlan.phaseStartedAt = Date.now();
+		state.activePlan.currentAgent = PLAN_AGENT_LABELS[phase] ?? PHASE_LABELS[phase];
+		state.activePlan.lastActivity = `Entering ${PHASE_LABELS[phase]}`;
+		state.activePlan.lastActivityAt = Date.now();
 	}
 	setPlanStatus(ctx, state, phase);
 	updatePlanProgressWidget(ctx, state);
@@ -777,8 +849,7 @@ function updatePlanProgressWidget(ctx: PlanContext, state: OrchRuntimeState): vo
 
 	ctx.ui.setWidget(
 		ORCH_WIDGET_IDS.planProgress,
-		(_tui, theme) => new OrchPlanProgressComponent(theme, state.activePlan!),
-		{ placement: "belowEditor" },
+		(tui, theme) => new OrchPlanProgressComponent(tui, theme, state.activePlan!),
 	);
 }
 
@@ -788,10 +859,17 @@ function clearPlanWidgets(ctx: PlanContext): void {
 }
 
 class OrchPlanProgressComponent implements Component {
+	private readonly intervalId: ReturnType<typeof setInterval>;
+
 	constructor(
+		private readonly tui: TUI,
 		private readonly theme: OrchTheme,
 		private readonly plan: OrchActivePlan,
-	) {}
+	) {
+		this.intervalId = setInterval(() => {
+			this.tui.requestRender();
+		}, SPINNER_FRAME_MS);
+	}
 
 	render(width: number): string[] {
 		return renderPlanProgressLines(this.theme, this.plan, width);
@@ -804,7 +882,22 @@ class OrchPlanProgressComponent implements Component {
 	invalidate(): void {
 		// Plan data is read on each render.
 	}
+
+	dispose(): void {
+		clearInterval(this.intervalId);
+	}
 }
+
+const PLAN_AGENT_LABELS: Record<PlanPhase, string> = {
+	clarifying: "Clarifier agent",
+	"researching-codebase": "Codebase analyst",
+	"researching-docs": "Docs/web researcher",
+	"assessing-feasibility": "Feasibility reviewer",
+	synthesizing: "Plan synthesizer",
+	completed: "Plan Mode",
+	cancelled: "Plan Mode",
+	failed: "Plan Mode",
+};
 
 const PHASE_LABELS: Record<PlanPhase, string> = {
 	clarifying: "Clarifying goal",
@@ -828,23 +921,39 @@ const PHASE_ORDER: PlanPhase[] = [
 function renderPlanProgressLines(theme: OrchTheme, plan: OrchActivePlan, width: number): string[] {
 	const lines: string[] = [];
 	const currentPhaseIndex = PHASE_ORDER.indexOf(plan.phase as PlanPhase);
-	const isInProgress = currentPhaseIndex >= 0;
+	const isTerminal = plan.phase === "completed" || plan.phase === "cancelled" || plan.phase === "failed";
+	const spinner = isTerminal ? GLYPHS.done : GLYPHS.spinner[Math.floor(Date.now() / SPINNER_FRAME_MS) % GLYPHS.spinner.length] ?? GLYPHS.spinner[0];
+	const totalElapsed = formatElapsed(Math.max(0, Date.now() - Date.parse(plan.startedAt)));
+	const phaseElapsed = formatElapsed(Math.max(0, Date.now() - plan.phaseStartedAt));
+	const statusColor = plan.phase === "failed" ? "error" : plan.phase === "cancelled" ? "warning" : plan.phase === "completed" ? "success" : "accent";
 
-	lines.push(formatPlanLine(theme, width, GLYPHS.boxTopLeft, ` Plan: ${truncateInlineText(plan.goal, 100)}`));
+	lines.push(formatPlanLine(theme, width, GLYPHS.boxTopLeft, ` ${theme.fg(statusColor, spinner)} ${theme.fg("accent", "Orch Plan Mode")} ${theme.fg("dim", `· ${totalElapsed}`)}`));
+	lines.push(formatPlanLine(theme, width, GLYPHS.boxVert, ` Goal: ${truncateInlineText(plan.refinedGoal || plan.goal, 120)}`));
+	lines.push(formatPlanLine(theme, width, GLYPHS.boxVert, ` Status: ${theme.fg(statusColor, PHASE_LABELS[plan.phase])}${!isTerminal ? theme.fg("dim", ` · ${phaseElapsed}`) : ""}`));
+	lines.push(formatPlanLine(theme, width, GLYPHS.boxVert, ` Agent: ${theme.fg("muted", plan.currentAgent || PLAN_AGENT_LABELS[plan.phase])}`));
+	lines.push(formatPlanLine(theme, width, GLYPHS.boxVert, ` Last activity: ${theme.fg("dim", truncateInlineText(plan.lastActivity || "Waiting for sub-agent activity", 110))}`));
+	if (plan.stateDir) {
+		lines.push(formatPlanLine(theme, width, GLYPHS.boxVert, ` Artifacts: ${theme.fg("dim", truncateInlineText(plan.stateDir, 110))}`));
+	}
+	lines.push(formatPlanLine(theme, width, GLYPHS.boxVert, ""));
+	lines.push(formatPlanLine(theme, width, GLYPHS.boxVert, ` Checklist:`));
 
 	for (let i = 0; i < PHASE_ORDER.length; i++) {
 		const phase = PHASE_ORDER[i];
 		const label = PHASE_LABELS[phase];
 		let glyph: string;
-		let color: "dim" | "accent" | "success" | "error";
+		let color: "dim" | "accent" | "success" | "error" | "warning";
 
-		if (plan.phase === "cancelled" || plan.phase === "failed") {
-			glyph = GLYPHS.pending;
-			color = "dim";
-		} else if (i < currentPhaseIndex) {
-			glyph = GLYPHS.done;
+		if (plan.phase === "failed" && i === currentPhaseIndex) {
+			glyph = GLYPHS.fail;
+			color = "error";
+		} else if (plan.phase === "cancelled" && i === currentPhaseIndex) {
+			glyph = GLYPHS.fail;
+			color = "warning";
+		} else if (i < currentPhaseIndex || plan.phase === "completed") {
+			glyph = GLYPHS.pass;
 			color = "success";
-		} else if (i === currentPhaseIndex) {
+		} else if (i === currentPhaseIndex && !isTerminal) {
 			glyph = GLYPHS.inProgress;
 			color = "accent";
 		} else {
@@ -852,16 +961,8 @@ function renderPlanProgressLines(theme: OrchTheme, plan: OrchActivePlan, width: 
 			color = "dim";
 		}
 
-		const phaseText = `${glyph} ${label}${isInProgress && i === currentPhaseIndex ? " (active)" : ""}`;
-		lines.push(formatPlanLine(theme, width, GLYPHS.boxVert, ` ${theme.fg(color, phaseText)}`));
-	}
-
-	if (plan.phase === "completed") {
-		lines.push(formatPlanLine(theme, width, GLYPHS.boxVert, ` ${theme.fg("success", `${GLYPHS.pass} Completed`)}`));
-	} else if (plan.phase === "cancelled") {
-		lines.push(formatPlanLine(theme, width, GLYPHS.boxVert, ` ${theme.fg("warning", `${GLYPHS.fail} Cancelled`)}`));
-	} else if (plan.phase === "failed") {
-		lines.push(formatPlanLine(theme, width, GLYPHS.boxVert, ` ${theme.fg("error", `${GLYPHS.fail} Failed`)}`));
+		const phaseText = `${glyph} ${label}${!isTerminal && i === currentPhaseIndex ? " (active)" : ""}`;
+		lines.push(formatPlanLine(theme, width, GLYPHS.boxVert, `   ${theme.fg(color, phaseText)}`));
 	}
 
 	lines.push(formatPlanLine(theme, width, GLYPHS.boxBottomLeft, " /plan cancel"));
@@ -878,6 +979,15 @@ function formatPlanLine(theme: OrchTheme, width: number, leftGlyph: string, body
 	const contentWidth = Math.max(0, width - visibleWidth(prefix));
 	const content = truncateToWidth(body, contentWidth, theme.fg("dim", GLYPHS.ellipsis));
 	return truncateToWidth(`${prefix}${content}`, width, theme.fg("dim", GLYPHS.ellipsis));
+}
+
+function getLastMeaningfulLine(value: string): string | undefined {
+	return value
+		.replace(/\r/g, "")
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0)
+		.at(-1);
 }
 
 function truncateInlineText(value: string, maxLength: number): string {
@@ -993,12 +1103,21 @@ function reportPlanEvent(
 	level: OrchEventLevel,
 ): void {
 	if (ctx.hasUI) {
-		emitOrchEvent(pi, ctx, body, { title, level, phase: "plan" });
+		if (shouldDisplayPlanEventInUi(level, title)) {
+			emitOrchEvent(pi, ctx, body, { title, level, phase: "plan" });
+		}
 		return;
 	}
 
 	const block = [`[${title}]`, body].filter((value) => value.trim().length > 0).join("\n");
 	process.stdout.write(`${block}\n`);
+}
+
+function shouldDisplayPlanEventInUi(level: OrchEventLevel, title: string): boolean {
+	if (level === "warning" || level === "error" || level === "success") {
+		return true;
+	}
+	return title === "Plan running";
 }
 
 function buildPlanCompletionText(result: PlanResult): string {

@@ -277,6 +277,12 @@ function getRoleTools(role: OrchRoleName): string[] {
 			return VALIDATOR_TOOLS;
 		case "smart_friend":
 			return SMART_FRIEND_TOOLS;
+		case "plan_clarifier":
+		case "plan_codebase":
+		case "plan_researcher":
+		case "plan_feasibility":
+		case "plan_synthesizer":
+			return ORCHESTRATOR_TOOLS;
 	}
 }
 

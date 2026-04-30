@@ -3,7 +3,26 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 
-export type OrchRoleName = "orchestrator" | "worker" | "validator" | "smart_friend";
+export const ORCH_ROLE_NAMES = [
+	"orchestrator",
+	"worker",
+	"validator",
+	"smart_friend",
+	"plan_clarifier",
+	"plan_codebase",
+	"plan_researcher",
+	"plan_feasibility",
+	"plan_synthesizer",
+] as const;
+
+export type OrchRoleName = (typeof ORCH_ROLE_NAMES)[number];
+export const ORCH_PLAN_ROLE_NAMES = [
+	"plan_clarifier",
+	"plan_codebase",
+	"plan_researcher",
+	"plan_feasibility",
+	"plan_synthesizer",
+] as const satisfies readonly OrchRoleName[];
 export type OrchConfigScope = "user" | "project";
 export type OrchConfigValue = number | string;
 
@@ -33,12 +52,7 @@ export type OrchConfig = {
 };
 
 export type OrchConfigOverrides = {
-	roles?: {
-		orchestrator?: Partial<OrchRoleModelConfig>;
-		worker?: Partial<OrchRoleModelConfig>;
-		validator?: Partial<OrchRoleModelConfig>;
-		smart_friend?: Partial<OrchRoleModelConfig>;
-	};
+	roles?: Partial<Record<OrchRoleName, Partial<OrchRoleModelConfig>>>;
 	tokenThresholds?: Partial<OrchTokenThresholds>;
 	paths?: Partial<OrchPathConfig>;
 };
@@ -80,6 +94,16 @@ export const ORCH_CONFIG_KEYS = [
 	"roles.validator.model",
 	"roles.smart_friend.provider",
 	"roles.smart_friend.model",
+	"roles.plan_clarifier.provider",
+	"roles.plan_clarifier.model",
+	"roles.plan_codebase.provider",
+	"roles.plan_codebase.model",
+	"roles.plan_researcher.provider",
+	"roles.plan_researcher.model",
+	"roles.plan_feasibility.provider",
+	"roles.plan_feasibility.model",
+	"roles.plan_synthesizer.provider",
+	"roles.plan_synthesizer.model",
 	"tokenThresholds.learningExtraction",
 	"tokenThresholds.contextWarning",
 	"paths.userProfileFile",
@@ -130,6 +154,46 @@ export const ORCH_CONFIG_KEY_INFO: Record<
 		description: "Model used by the Orch smart friend advisor",
 		valueType: "string",
 	},
+	"roles.plan_clarifier.provider": {
+		description: "Provider used by the Orch Plan Mode clarifier",
+		valueType: "string",
+	},
+	"roles.plan_clarifier.model": {
+		description: "Model used by the Orch Plan Mode clarifier",
+		valueType: "string",
+	},
+	"roles.plan_codebase.provider": {
+		description: "Provider used by the Orch Plan Mode codebase analyst",
+		valueType: "string",
+	},
+	"roles.plan_codebase.model": {
+		description: "Model used by the Orch Plan Mode codebase analyst",
+		valueType: "string",
+	},
+	"roles.plan_researcher.provider": {
+		description: "Provider used by the Orch Plan Mode docs/web researcher",
+		valueType: "string",
+	},
+	"roles.plan_researcher.model": {
+		description: "Model used by the Orch Plan Mode docs/web researcher",
+		valueType: "string",
+	},
+	"roles.plan_feasibility.provider": {
+		description: "Provider used by the Orch Plan Mode feasibility reviewer",
+		valueType: "string",
+	},
+	"roles.plan_feasibility.model": {
+		description: "Model used by the Orch Plan Mode feasibility reviewer",
+		valueType: "string",
+	},
+	"roles.plan_synthesizer.provider": {
+		description: "Provider used by the Orch Plan Mode plan synthesizer",
+		valueType: "string",
+	},
+	"roles.plan_synthesizer.model": {
+		description: "Model used by the Orch Plan Mode plan synthesizer",
+		valueType: "string",
+	},
 	"tokenThresholds.learningExtraction": {
 		description: "Token count that triggers a learning-extraction prompt",
 		valueType: "number",
@@ -164,7 +228,6 @@ export const ORCH_CONFIG_KEY_INFO: Record<
 	},
 };
 
-const ORCH_ROLE_NAMES: OrchRoleName[] = ["orchestrator", "worker", "validator", "smart_friend"];
 const PROJECT_PATH_KEYS: Array<keyof OrchPathConfig> = [
 	"projectContextFile",
 	"knowledgeBaseFile",
@@ -190,6 +253,26 @@ const DEFAULT_ORCH_CONFIG: OrchConfig = {
 		smart_friend: {
 			provider: "anthropic",
 			model: "claude-opus-4-7",
+		},
+		plan_clarifier: {
+			provider: "anthropic",
+			model: "claude-opus-4-5",
+		},
+		plan_codebase: {
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+		},
+		plan_researcher: {
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+		},
+		plan_feasibility: {
+			provider: "anthropic",
+			model: "claude-opus-4-5",
+		},
+		plan_synthesizer: {
+			provider: "anthropic",
+			model: "claude-opus-4-5",
 		},
 	},
 	tokenThresholds: {
@@ -227,6 +310,11 @@ export function getOrchConfigPath(scope: OrchConfigScope, cwd: string): string {
 }
 
 export function getEffectiveOrchConfigValue(config: OrchConfig, key: OrchConfigKey): OrchConfigValue {
+	const roleKey = parseRoleConfigKey(key);
+	if (roleKey) {
+		return config.roles[roleKey.role][roleKey.field];
+	}
+
 	switch (key) {
 		case "roles.orchestrator.provider":
 			return config.roles.orchestrator.provider;
@@ -288,6 +376,7 @@ export async function loadOrchConfig(cwd: string): Promise<OrchLoadedConfig> {
 	let merged = createDefaultOrchConfig();
 	merged = applyOrchConfigOverrides(merged, user.overrides);
 	merged = applyOrchConfigOverrides(merged, project.overrides);
+	merged = applyPlanRoleModelFallbacks(merged, user.overrides, project.overrides);
 
 	const warnings = [...user.warnings, ...project.warnings];
 
@@ -595,6 +684,26 @@ function normalizeOrchConfigOverrides(
 	return { overrides, warnings };
 }
 
+function applyPlanRoleModelFallbacks(
+	base: OrchConfig,
+	userOverrides: OrchConfigOverrides,
+	projectOverrides: OrchConfigOverrides,
+): OrchConfig {
+	const next = structuredClone(base);
+	for (const role of ORCH_PLAN_ROLE_NAMES) {
+		if (hasRoleModelOverride(userOverrides, role) || hasRoleModelOverride(projectOverrides, role)) {
+			continue;
+		}
+		next.roles[role] = structuredClone(next.roles.orchestrator);
+	}
+	return next;
+}
+
+function hasRoleModelOverride(overrides: OrchConfigOverrides, role: OrchRoleName): boolean {
+	const roleOverride = overrides.roles?.[role];
+	return roleOverride?.provider !== undefined || roleOverride?.model !== undefined;
+}
+
 function applyOrchConfigOverrides(base: OrchConfig, overrides: OrchConfigOverrides): OrchConfig {
 	const next = structuredClone(base);
 
@@ -651,6 +760,14 @@ function resolveConfiguredPath(baseDir: string, configuredPath: string): string 
 }
 
 function setValueInOverrides(overrides: OrchConfigOverrides, key: OrchConfigKey, value: OrchConfigValue): void {
+	const roleKey = parseRoleConfigKey(key);
+	if (roleKey) {
+		overrides.roles ??= {};
+		overrides.roles[roleKey.role] ??= {};
+		overrides.roles[roleKey.role][roleKey.field] = value as string;
+		return;
+	}
+
 	switch (key) {
 		case "roles.orchestrator.provider":
 			overrides.roles ??= {};
@@ -725,6 +842,18 @@ function setValueInOverrides(overrides: OrchConfigOverrides, key: OrchConfigKey,
 			overrides.paths.plansDir = value as string;
 			return;
 	}
+}
+
+function parseRoleConfigKey(key: string): { role: OrchRoleName; field: keyof OrchRoleModelConfig } | undefined {
+	const match = key.match(/^roles\.([^.]+)\.(provider|model)$/);
+	if (!match) {
+		return undefined;
+	}
+	const role = match[1];
+	if (!ORCH_ROLE_NAMES.includes(role as OrchRoleName)) {
+		return undefined;
+	}
+	return { role: role as OrchRoleName, field: match[2] as keyof OrchRoleModelConfig };
 }
 
 async function writeConfigFile(path: string, value: OrchConfig | OrchConfigOverrides): Promise<void> {

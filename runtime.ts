@@ -2,7 +2,7 @@ import type { WriteStream } from "node:fs";
 import type { ImageContent } from "@mariozechner/pi-ai";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 
-import type { OrchLoadedConfig, OrchRoleName } from "./config.js";
+import { ORCH_ROLE_NAMES, type OrchLoadedConfig, type OrchRoleName } from "./config.js";
 import { ORCH_COMMANDS, ORCH_EXTENSION_ID, ORCH_EXTENSION_NAME, ORCH_EXTENSION_VERSION } from "./constants.js";
 import type { MissionFeaturesStateFile, MissionLiveState } from "./mission-types.js";
 
@@ -72,6 +72,10 @@ export type OrchActivePlan = {
 	refinedGoal: string;
 	readonly startedAt: string;
 	phase: PlanPhase;
+	phaseStartedAt: number;
+	currentAgent: string;
+	lastActivity: string;
+	lastActivityAt: number;
 	abortController: AbortController;
 	stateDir?: string;
 	stateFilePath?: string;
@@ -219,7 +223,7 @@ export function formatRuntimeSummary(state: OrchRuntimeState, cwd: string): stri
 	if (state.configState) {
 		const { merged, project, resolvedPaths, user, warnings } = state.configState;
 		lines.push(
-			`roles: orchestrator=${merged.roles.orchestrator.provider}/${merged.roles.orchestrator.model}, worker=${merged.roles.worker.provider}/${merged.roles.worker.model}, validator=${merged.roles.validator.provider}/${merged.roles.validator.model}, smart_friend=${merged.roles.smart_friend.provider}/${merged.roles.smart_friend.model}`,
+			`roles: ${ORCH_ROLE_NAMES.map((role) => `${role}=${merged.roles[role].provider}/${merged.roles[role].model}`).join(", ")}`,
 		);
 		lines.push(
 			`tokenThresholds: learningExtraction=${merged.tokenThresholds.learningExtraction}, contextWarning=${merged.tokenThresholds.contextWarning}`,

@@ -4,6 +4,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-cod
 import {
 	isOrchConfigScope,
 	loadOrchConfig,
+	ORCH_ROLE_NAMES,
 	setOrchRoleModelConfig,
 	type OrchConfigScope,
 	type OrchLoadedConfig,
@@ -23,8 +24,6 @@ type OrchModelChoice = {
 	reference: string;
 	label: string;
 };
-
-const ORCH_ROLE_NAMES: OrchRoleName[] = ["orchestrator", "worker", "validator", "smart_friend"];
 
 export function registerOrchModelCommand(pi: ExtensionAPI, state: OrchRuntimeState): void {
 	pi.registerCommand(ORCH_COMMANDS.model, {

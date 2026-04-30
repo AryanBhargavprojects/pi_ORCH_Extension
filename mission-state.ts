@@ -21,18 +21,33 @@ const GUIDELINES_LIMIT: Record<OrchRoleName, number> = {
 	worker: 4000,
 	validator: 0,
 	smart_friend: 0,
+	plan_clarifier: 4000,
+	plan_codebase: 4000,
+	plan_researcher: 4000,
+	plan_feasibility: 4000,
+	plan_synthesizer: 4000,
 };
 const KNOWLEDGE_BASE_LIMIT: Record<OrchRoleName, number> = {
 	orchestrator: 5000,
 	worker: 3500,
 	validator: 5000,
 	smart_friend: 5000,
+	plan_clarifier: 5000,
+	plan_codebase: 5000,
+	plan_researcher: 5000,
+	plan_feasibility: 5000,
+	plan_synthesizer: 5000,
 };
 const VALIDATION_CONTRACT_LIMIT: Record<OrchRoleName, number> = {
 	orchestrator: 4000,
 	worker: 4000,
 	validator: 4000,
 	smart_friend: 4000,
+	plan_clarifier: 4000,
+	plan_codebase: 4000,
+	plan_researcher: 4000,
+	plan_feasibility: 4000,
+	plan_synthesizer: 4000,
 };
 
 export async function initializeMissionState(

@@ -166,11 +166,16 @@ Behavior:
   - `worker`
   - `validator`
   - `smart_friend`
+  - `plan_clarifier`
+  - `plan_codebase`
+  - `plan_researcher`
+  - `plan_feasibility`
+  - `plan_synthesizer`
 - lets the user choose which config scope to write to:
   - project scope
   - user scope
 - persists the selected provider/model pair into Orch config
-- the selected role models are then used by Orch sub-agents during delegation and `/mission` runs
+- the selected role models are then used by Orch sub-agents during delegation, `/mission`, and `/plan` runs
 
 Interactive flow:
 
@@ -292,7 +297,7 @@ Phase 4 behavior now implemented:
 
 ## Plan Mode
 
-`/plan <goal>` runs a read-only planning workflow that produces a structured plan without modifying the project. Plan sub-agents use read-only tools plus a bash allowlist for safe inspection commands.
+`/plan <goal>` runs a read-only planning workflow that produces a structured plan without modifying the project. Plan sub-agents use read-only tools plus a bash allowlist for safe inspection commands. A live Plan Control block appears above the editor with phase, active sub-agent, elapsed time, latest activity, checklist, and artifact path.
 
 Workflow phases:
 
@@ -323,6 +328,8 @@ If an agent turn or mission is already running, the shortcut notifies instead of
 
 After completion, Orch suggests running `/mission <refined goal>` to execute the plan autonomously.
 
+Plan Mode role models are configurable through `/orch-model` using `plan_clarifier`, `plan_codebase`, `plan_researcher`, `plan_feasibility`, and `plan_synthesizer`. If a plan role is not explicitly configured, it inherits the current merged `orchestrator` model so existing project configs keep working.
+
 ## Config files
 
 Orch merges config from two scopes:
@@ -346,7 +353,12 @@ Project config overrides user config.
     "orchestrator": { "provider": "anthropic", "model": "claude-opus-4-5" },
     "worker": { "provider": "anthropic", "model": "claude-sonnet-4-5" },
     "validator": { "provider": "anthropic", "model": "claude-sonnet-4-5" },
-    "smart_friend": { "provider": "anthropic", "model": "claude-opus-4-7" }
+    "smart_friend": { "provider": "anthropic", "model": "claude-opus-4-7" },
+    "plan_clarifier": { "provider": "anthropic", "model": "claude-opus-4-5" },
+    "plan_codebase": { "provider": "anthropic", "model": "claude-sonnet-4-5" },
+    "plan_researcher": { "provider": "anthropic", "model": "claude-sonnet-4-5" },
+    "plan_feasibility": { "provider": "anthropic", "model": "claude-opus-4-5" },
+    "plan_synthesizer": { "provider": "anthropic", "model": "claude-opus-4-5" }
   },
   "tokenThresholds": {
     "learningExtraction": 100000,
@@ -379,6 +391,11 @@ Files:
 - `prompts/worker.md`
 - `prompts/validator.md`
 - `prompts/smart-friend.md`
+- `prompts/plan_clarifier.md`
+- `prompts/plan_codebase.md`
+- `prompts/plan_researcher.md`
+- `prompts/plan_feasibility.md`
+- `prompts/plan_synthesizer.md`
 
 The interactive orchestrator prompt and fresh sub-agent sessions load from these files.
 
