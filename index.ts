@@ -7,6 +7,7 @@ import { registerOrchFooter } from "./footer.js";
 import { registerImagePasteAttachments } from "./image-paste.js";
 import { registerInteractiveOrch } from "./interactive.js";
 import { registerMissionCommand } from "./mission.js";
+import { registerPlanCommand } from "./plan.js";
 import { registerOrchMessageRenderer } from "./messages.js";
 import { registerOrchModelCommand } from "./model-command.js";
 import { clearOrchStatus, createRuntimeState, markSessionStart, setOrchStatus } from "./runtime.js";
@@ -24,6 +25,7 @@ export default function orchExtension(pi: ExtensionAPI): void {
 	registerOrchModelCommand(pi, runtimeState);
 	registerImagePasteAttachments(pi);
 	registerMissionCommand(pi, runtimeState);
+	registerPlanCommand(pi, runtimeState);
 	registerInteractiveOrch(pi, runtimeState);
 
 	pi.on("session_start", async (event, ctx) => {
@@ -44,12 +46,20 @@ export default function orchExtension(pi: ExtensionAPI): void {
 		if (runtimeState.activeMission && !runtimeState.activeMission.abortController.signal.aborted) {
 			runtimeState.activeMission.abortController.abort();
 		}
+		if (runtimeState.activePlan && !runtimeState.activePlan.abortController.signal.aborted) {
+			runtimeState.activePlan.abortController.abort();
+		}
+		if (runtimeState.activePlan) {
+			runtimeState.activePlan = undefined;
+		}
 		clearOrchStatus(ctx);
 		if (ctx.hasUI) {
 			ctx.ui.setStatus("orch-mission", undefined);
+			ctx.ui.setStatus("orch-plan", undefined);
 			ctx.ui.setWidget(ORCH_WIDGET_IDS.missionBlock, undefined);
 			ctx.ui.setWidget(ORCH_WIDGET_IDS.missionThinking, undefined);
 			ctx.ui.setWidget(ORCH_WIDGET_IDS.missionProgress, undefined);
+			ctx.ui.setWidget(ORCH_WIDGET_IDS.planProgress, undefined);
 		}
 	});
 }

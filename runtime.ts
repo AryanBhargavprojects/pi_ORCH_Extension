@@ -6,6 +6,8 @@ import type { OrchLoadedConfig, OrchRoleName } from "./config.js";
 import { ORCH_COMMANDS, ORCH_EXTENSION_ID, ORCH_EXTENSION_NAME, ORCH_EXTENSION_VERSION } from "./constants.js";
 import type { MissionFeaturesStateFile, MissionLiveState } from "./mission-types.js";
 
+import type { PlanPhase } from "./plan-types.js";
+
 export type OrchFooterMascotMood =
 	| "idle"
 	| "thinking"
@@ -64,12 +66,25 @@ export type OrchActiveMission = {
 	backgroundPromise?: Promise<void>;
 };
 
+export type OrchActivePlan = {
+	readonly id: string;
+	readonly goal: string;
+	refinedGoal: string;
+	readonly startedAt: string;
+	phase: PlanPhase;
+	abortController: AbortController;
+	stateDir?: string;
+	stateFilePath?: string;
+	backgroundPromise?: Promise<void>;
+};
+
 export type OrchRuntimeState = {
 	readonly bootId: string;
 	readonly version: string;
 	readonly loadedAt: string;
 	configState?: OrchLoadedConfig;
 	activeMission?: OrchActiveMission;
+	activePlan?: OrchActivePlan;
 	footer: OrchFooterRuntimeState;
 	lastSessionStartReason?: string;
 	lastSessionStartedAt?: string;
@@ -114,6 +129,10 @@ export function setOrchStatus(ctx: ExtensionContext, state: OrchRuntimeState): v
 
 	if (state.activeMission) {
 		parts.push(ctx.ui.theme.fg("accent", `mission:${state.activeMission.phase}`));
+	}
+
+	if (state.activePlan) {
+		parts.push(ctx.ui.theme.fg("accent", `plan:${state.activePlan.phase}`));
 	}
 
 	ctx.ui.setStatus(ORCH_EXTENSION_ID, parts.join(" "));
@@ -164,7 +183,7 @@ export function formatRuntimeSummary(state: OrchRuntimeState, cwd: string): stri
 		`sessionReason: ${sessionReason}`,
 		`sessionStartedAt: ${sessionStartedAt}`,
 		`cwd: ${cwd}`,
-		`commands: /${ORCH_COMMANDS.main} | /${ORCH_COMMANDS.model} | /${ORCH_COMMANDS.mission} | /${ORCH_COMMANDS.status} | /${ORCH_COMMANDS.reload} | /${ORCH_COMMANDS.takeover} | /reload`,
+		`commands: /${ORCH_COMMANDS.main} | /${ORCH_COMMANDS.model} | /${ORCH_COMMANDS.mission} | /${ORCH_COMMANDS.plan} | /${ORCH_COMMANDS.status} | /${ORCH_COMMANDS.reload} | /${ORCH_COMMANDS.takeover} | /reload`,
 	];
 
 	if (state.activeMission) {
@@ -186,6 +205,17 @@ export function formatRuntimeSummary(state: OrchRuntimeState, cwd: string): stri
 		}
 	}
 
+	if (state.activePlan) {
+		lines.push(`activePlan: ${state.activePlan.goal}`);
+		lines.push(`activePlanPhase: ${state.activePlan.phase}`);
+		if (state.activePlan.stateDir) {
+			lines.push(`planStateDir: ${state.activePlan.stateDir}`);
+		}
+		if (state.activePlan.stateFilePath) {
+			lines.push(`planStateFile: ${state.activePlan.stateFilePath}`);
+		}
+	}
+
 	if (state.configState) {
 		const { merged, project, resolvedPaths, user, warnings } = state.configState;
 		lines.push(
@@ -201,6 +231,7 @@ export function formatRuntimeSummary(state: OrchRuntimeState, cwd: string): stri
 		lines.push(`knowledgeBaseFile: ${resolvedPaths.knowledgeBaseFile}`);
 		lines.push(`missionsDir: ${resolvedPaths.missionsDir}`);
 		lines.push(`adaptationLogFile: ${resolvedPaths.adaptationLogFile}`);
+		lines.push(`plansDir: ${resolvedPaths.plansDir}`);
 
 		if (warnings.length > 0) {
 			lines.push(`warnings: ${warnings.join(" | ")}`);

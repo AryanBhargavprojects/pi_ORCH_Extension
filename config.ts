@@ -23,6 +23,7 @@ export type OrchPathConfig = {
 	knowledgeBaseFile: string;
 	missionsDir: string;
 	adaptationLogFile: string;
+	plansDir: string;
 };
 
 export type OrchConfig = {
@@ -59,6 +60,7 @@ export type OrchResolvedPaths = {
 	knowledgeBaseFile: string;
 	missionsDir: string;
 	adaptationLogFile: string;
+	plansDir: string;
 };
 
 export type OrchLoadedConfig = {
@@ -85,6 +87,7 @@ export const ORCH_CONFIG_KEYS = [
 	"paths.knowledgeBaseFile",
 	"paths.missionsDir",
 	"paths.adaptationLogFile",
+	"paths.plansDir",
 ] as const;
 
 export type OrchConfigKey = (typeof ORCH_CONFIG_KEYS)[number];
@@ -155,6 +158,10 @@ export const ORCH_CONFIG_KEY_INFO: Record<
 		description: "Proposal/adaptation log file, relative to the project root unless absolute",
 		valueType: "string",
 	},
+	"paths.plansDir": {
+		description: "Plan Mode working directory, relative to the project root unless absolute",
+		valueType: "string",
+	},
 };
 
 const ORCH_ROLE_NAMES: OrchRoleName[] = ["orchestrator", "worker", "validator", "smart_friend"];
@@ -163,6 +170,7 @@ const PROJECT_PATH_KEYS: Array<keyof OrchPathConfig> = [
 	"knowledgeBaseFile",
 	"missionsDir",
 	"adaptationLogFile",
+	"plansDir",
 ];
 
 const DEFAULT_ORCH_CONFIG: OrchConfig = {
@@ -194,6 +202,7 @@ const DEFAULT_ORCH_CONFIG: OrchConfig = {
 		knowledgeBaseFile: ".pi/orch/knowledge-base.json",
 		missionsDir: ".pi/orch/missions",
 		adaptationLogFile: ".pi/orch/adaptation-log.jsonl",
+		plansDir: ".pi/orch/plans",
 	},
 };
 
@@ -249,6 +258,8 @@ export function getEffectiveOrchConfigValue(config: OrchConfig, key: OrchConfigK
 			return config.paths.missionsDir;
 		case "paths.adaptationLogFile":
 			return config.paths.adaptationLogFile;
+		case "paths.plansDir":
+			return config.paths.plansDir;
 	}
 }
 
@@ -550,6 +561,11 @@ function normalizeOrchConfigOverrides(
 				`${label}.paths.adaptationLogFile`,
 				warnings,
 			);
+			const plansDir = getStringValue(
+				pathsValue.plansDir,
+				`${label}.paths.plansDir`,
+				warnings,
+			);
 
 			if (userProfileFile !== undefined) {
 				paths.userProfileFile = userProfileFile;
@@ -565,6 +581,9 @@ function normalizeOrchConfigOverrides(
 			}
 			if (adaptationLogFile !== undefined) {
 				paths.adaptationLogFile = adaptationLogFile;
+			}
+			if (plansDir !== undefined) {
+				paths.plansDir = plansDir;
 			}
 
 			if (Object.keys(paths).length > 0) {
@@ -619,6 +638,7 @@ function resolveOrchPaths(config: OrchConfig, cwd: string): OrchResolvedPaths {
 		knowledgeBaseFile: resolveConfiguredPath(cwd, config.paths.knowledgeBaseFile),
 		missionsDir: resolveConfiguredPath(cwd, config.paths.missionsDir),
 		adaptationLogFile: resolveConfiguredPath(cwd, config.paths.adaptationLogFile),
+		plansDir: resolveConfiguredPath(cwd, config.paths.plansDir),
 	};
 }
 
@@ -699,6 +719,10 @@ function setValueInOverrides(overrides: OrchConfigOverrides, key: OrchConfigKey,
 		case "paths.adaptationLogFile":
 			overrides.paths ??= {};
 			overrides.paths.adaptationLogFile = value as string;
+			return;
+		case "paths.plansDir":
+			overrides.paths ??= {};
+			overrides.paths.plansDir = value as string;
 			return;
 	}
 }

@@ -71,12 +71,15 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 				emitUpdate();
 
 				const summary = [`Orch ${result.role}`, `${result.provider}/${result.modelId}`].join(" • ");
+				const resultText = result.output.trim().length > 0
+					? result.output
+					: buffer.finalSummary || `${summary} completed with no text output.`;
 
 				return {
 					content: [
 						{
 							type: "text",
-							text: result.output.length > 0 ? result.output : `${summary} completed with no text output.`,
+							text: resultText,
 						},
 					],
 					details: {
@@ -310,25 +313,75 @@ function trimDelegationEvents(events: DelegationEventKind[]): void {
 }
 
 function applyDelegationFinalOutput(buffer: DelegationBuffer, role: OrchRoleName, output: string): void {
+	const trimmedOutput = output.trim();
 	const parsed = parseJsonObject(output);
 	if (!parsed) {
-		buffer.finalSummary = output.trim();
+		buffer.finalSummary = trimmedOutput.length > 0
+			? trimmedOutput
+			: `Orch ${role} delegation returned no text output.`;
+		buffer.finalHandoff = "";
+		buffer.finalIssues = [];
+		buffer.issueCount = 0;
+
+		if (trimmedOutput.length === 0) {
+			buffer.status = "failed";
+			if (role === "validator") {
+				buffer.finalIssues = [createDelegationIssue(
+					"major",
+					"No validator output",
+					"The validator sub-agent completed without returning review text or structured JSON.",
+				)];
+				buffer.issueCount = buffer.finalIssues.length;
+			}
+			return;
+		}
+
+		if (role === "validator") {
+			buffer.status = "failed";
+			buffer.finalIssues = [createDelegationIssue(
+				"major",
+				"Unstructured validator output",
+				"The validator sub-agent returned text, but not the expected strict JSON with passed, summary, issues, and evidence fields.",
+			)];
+			buffer.issueCount = buffer.finalIssues.length;
+			return;
+		}
+
 		buffer.status = "done";
 		return;
 	}
 
-	buffer.finalSummary = asNonEmptyString(parsed.summary) ?? output.trim();
+	buffer.finalSummary = asNonEmptyString(parsed.summary) ?? trimmedOutput;
 	buffer.finalHandoff = role === "worker" ? asNonEmptyString(parsed.handoff) ?? "" : "";
 	buffer.finalIssues = Array.isArray(parsed.issues)
 		? parsed.issues.map(normalizeDelegationIssue).filter((issue): issue is DelegationBuffer["finalIssues"][number] => issue !== undefined)
 		: [];
 	buffer.issueCount = buffer.finalIssues.length;
 
+	if (role === "validator" && typeof parsed.passed !== "boolean") {
+		buffer.finalIssues.unshift(createDelegationIssue(
+			"major",
+			"Missing validator verdict",
+			"The validator JSON did not include a boolean passed field.",
+		));
+		buffer.issueCount = buffer.finalIssues.length;
+		buffer.status = "failed";
+		return;
+	}
+
 	if (role === "validator" && (parsed.passed === false || buffer.issueCount > 0)) {
 		buffer.status = "failed";
 		return;
 	}
 	buffer.status = "done";
+}
+
+function createDelegationIssue(
+	severity: string,
+	title: string,
+	details: string,
+): DelegationBuffer["finalIssues"][number] {
+	return { severity, title, details };
 }
 
 function normalizeDelegationIssue(value: unknown): DelegationBuffer["finalIssues"][number] | undefined {

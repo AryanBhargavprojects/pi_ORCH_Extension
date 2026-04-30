@@ -167,6 +167,10 @@ class OrchFooterComponent implements Component {
 }
 
 function resolveMascotMood(ctx: ExtensionContext, state: OrchRuntimeState): OrchFooterMascotMood {
+	if (state.activePlan) {
+		return "orchestrator";
+	}
+
 	const phase = state.activeMission?.phase.toLowerCase();
 	if (phase) {
 		if (phase.includes("validat")) {

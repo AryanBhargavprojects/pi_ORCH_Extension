@@ -1,10 +1,11 @@
 export const ORCH_EXTENSION_ID = "orch";
 export const ORCH_EXTENSION_NAME = "Orch";
-export const ORCH_EXTENSION_VERSION = "0.2.2";
+export const ORCH_EXTENSION_VERSION = "0.3.0";
 
 export const ORCH_COMMANDS = {
 	main: "orch",
 	mission: "mission",
+	plan: "plan",
 	model: "orch-model",
 	status: "orch-status",
 	reload: "orch-reload",
@@ -44,4 +45,5 @@ export const ORCH_WIDGET_IDS = {
 	missionBlock: "orch-mission-block",
 	missionThinking: "orch-mission-thinking",
 	missionProgress: "orch-mission-progress",
+	planProgress: "orch-plan-progress",
 } as const;

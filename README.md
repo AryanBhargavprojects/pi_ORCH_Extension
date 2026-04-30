@@ -69,6 +69,9 @@ That lets you iterate in-place and reload with `/reload`.
 - `mission.ts` - autonomous `/mission` loop, planning, milestones, validation, fix-task steering, and the live mission block UI
 - `mission-state.ts` - live mission state directory I/O, state snapshots, feature status tracking
 - `mission-types.ts` - shared mission, milestone, fix-task, and state types
+- `plan.ts` - Plan Mode workflow, `/plan` command, Ctrl+\` shortcut, plan progress UI
+- `plan-state.ts` - Plan Mode state directory I/O and artifact persistence
+- `plan-types.ts` - shared Plan Mode types
 - `tool-renderers.ts` - compact built-in tool rendering for subtler chat activity
 - `messages.ts` - Orch event message renderer/helpers
 - `prompt-loader.ts` - loads role prompts from the extension-local prompt folder
@@ -96,6 +99,10 @@ Primary entrypoints:
 - `/orch reload` - reload Pi so Orch changes are picked up immediately
 - `/orch-model [user|project] [role] [provider/model]` - select a Pi-available model for Orch sub-agents
 - `/mission <goal>` - start explicit autonomous mission mode
+- `/plan <goal>` - start Plan Mode (read-only analysis, no project edits)
+- `/plan status` - report active plan status
+- `/plan cancel` - abort active plan
+- Ctrl+\` - enter Plan Mode using editor text or prompt for goal
 
 Compatibility aliases:
 
@@ -283,6 +290,39 @@ Phase 4 behavior now implemented:
   - collapsed tool rows show concise summaries instead of dumping raw output by default
   - `ctrl+o` still expands the row to show the underlying detailed output or diff
 
+## Plan Mode
+
+`/plan <goal>` runs a read-only planning workflow that produces a structured plan without modifying the project. Plan sub-agents use read-only tools plus a bash allowlist for safe inspection commands.
+
+Workflow phases:
+
+1. **Clarifier** - refines the goal and asks clarification questions if needed
+2. **Codebase analysis** - inspects the repository with read-only tools
+3. **Docs/web research** - reviews repo docs and performs best-effort external docs/web lookup when available
+4. **Feasibility assessment** - evaluates technical risks and approach
+5. **Synthesis** - produces final `plan.md` and `validation-contract.md`
+
+Plan artifacts are written to `.pi/orch/plans/<plan-id>/`:
+
+- `brief.md` - original and refined goal with assumptions
+- `questions.json` - clarification questions and answers
+- `research/codebase-analysis.md` - codebase analysis report
+- `research/docs-web-research.md` - documentation research report
+- `feasibility.md` - feasibility assessment
+- `plan.md` - final implementation plan
+- `validation-contract.md` - acceptance criteria for validation
+- `state.json` - runtime plan state
+
+Shortcuts:
+
+- Ctrl+\` enters Plan Mode using editor text (or prompts for a goal if editor is empty)
+- `/plan status` shows active plan phase and state directory
+- `/plan cancel` aborts an active plan
+
+If an agent turn or mission is already running, the shortcut notifies instead of starting a second plan.
+
+After completion, Orch suggests running `/mission <refined goal>` to execute the plan autonomously.
+
 ## Config files
 
 Orch merges config from two scopes:
@@ -317,7 +357,8 @@ Project config overrides user config.
     "projectContextFile": ".pi/orch/project-context.json",
     "knowledgeBaseFile": ".pi/orch/knowledge-base.json",
     "missionsDir": ".pi/orch/missions",
-    "adaptationLogFile": ".pi/orch/adaptation-log.jsonl"
+    "adaptationLogFile": ".pi/orch/adaptation-log.jsonl",
+    "plansDir": ".pi/orch/plans"
   }
 }
 ```

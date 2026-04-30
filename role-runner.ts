@@ -4,6 +4,7 @@ import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { Api, AssistantMessage, Model, TextContent } from "@mariozechner/pi-ai";
 import {
 	createAgentSession,
+	createBashToolDefinition,
 	createFindToolDefinition,
 	createGrepToolDefinition,
 	createLsToolDefinition,
@@ -53,6 +54,9 @@ export type OrchSubagentRequest = {
 	modelRegistry: ModelRegistry;
 	signal?: AbortSignal;
 	onStreamEvent?: (event: OrchSubagentStreamEvent) => void;
+	toolNames?: string[];
+	bashCommandGuard?: (command: string) => boolean;
+	bashGuardReason?: string;
 };
 
 export type OrchSubagentResult = {
@@ -128,13 +132,14 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 		model,
 		modelRegistry: request.modelRegistry,
 		resourceLoader,
-		tools: getRoleTools(request.role),
+		tools: (request.toolNames ?? getRoleTools(request.role)) as any,
 		customTools: getRoleToolOverrides(request),
 		sessionManager: SessionManager.inMemory(request.cwd),
 		settingsManager,
 	});
 
 	const toolArgsById = new Map<string, { toolName: string; args: unknown }>();
+	let streamedText = "";
 	const unsubscribe = session.subscribe((event) => {
 		if (event.type === "tool_execution_start") {
 			toolArgsById.set(event.toolCallId, { toolName: event.toolName, args: event.args });
@@ -167,6 +172,7 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 		}
 
 		if (event.assistantMessageEvent.type === "text_delta") {
+			streamedText += event.assistantMessageEvent.delta;
 			request.onStreamEvent?.({
 				role: request.role,
 				type: "text_delta",
@@ -196,7 +202,7 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 		await session.prompt(request.prompt);
 		request.onStreamEvent?.({ role: request.role, type: "status", status: "completed" });
 		const assistantMessage = findLastAssistantMessage(session.messages);
-		const output = assistantMessage ? getAssistantText(assistantMessage) : "";
+		const output = findLastAssistantText(session.messages) ?? streamedText.trim();
 
 		return {
 			role: request.role,
@@ -401,8 +407,26 @@ function truncateOneLine(value: string, maxLength: number): string {
 }
 
 function getRoleToolOverrides(request: OrchSubagentRequest) {
+	const overrides: any[] = [];
+
+	if (request.bashCommandGuard) {
+		const bashTool = createBashToolDefinition(request.cwd);
+		overrides.push({
+			...bashTool,
+			async execute(toolCallId, params, signal, onUpdate, ctx) {
+				if (!request.bashCommandGuard?.(params.command)) {
+					throw new Error(
+						request.bashGuardReason ??
+							`Command blocked by Orch ${request.role} bash guard: ${params.command}`,
+					);
+				}
+				return bashTool.execute(toolCallId, params, signal, onUpdate, ctx);
+			},
+		});
+	}
+
 	if (request.role !== "validator") {
-		return [];
+		return overrides;
 	}
 
 	const blockedRoots = getValidatorBlockedRoots(request.configState);
@@ -411,7 +435,7 @@ function getRoleToolOverrides(request: OrchSubagentRequest) {
 	const findTool = createFindToolDefinition(request.cwd);
 	const lsTool = createLsToolDefinition(request.cwd);
 
-	return [
+	overrides.push(
 		{
 			...readTool,
 			async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -470,7 +494,9 @@ function getRoleToolOverrides(request: OrchSubagentRequest) {
 				};
 			},
 		},
-	];
+	);
+
+	return overrides;
 }
 
 function getValidatorBlockedRoots(configState: OrchLoadedConfig): string[] {
@@ -710,6 +736,20 @@ function findLastAssistantMessage(messages: AgentMessage[]): AssistantMessage | 
 
 function isAssistantMessage(message: AgentMessage): message is AssistantMessage {
 	return message.role === "assistant" && Array.isArray(message.content);
+}
+
+function findLastAssistantText(messages: AgentMessage[]): string | undefined {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (!isAssistantMessage(message)) {
+			continue;
+		}
+		const text = getAssistantText(message);
+		if (text.length > 0) {
+			return text;
+		}
+	}
+	return undefined;
 }
 
 function getAssistantText(message: AssistantMessage): string {

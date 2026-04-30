@@ -271,6 +271,9 @@ function buildOrchHelpText(): string {
 		`  /${ORCH_COMMANDS.main} reload`,
 		`  /${ORCH_COMMANDS.model} [user|project] [role] [provider/model]`,
 		`  /${ORCH_COMMANDS.mission} <goal>`,
+		`  /${ORCH_COMMANDS.plan} <goal>`,
+		`  /${ORCH_COMMANDS.plan} status`,
+		`  /${ORCH_COMMANDS.plan} cancel`,
 		`  /${ORCH_COMMANDS.takeover} [prompt]`,
 		"",
 		buildConfigKeyListText(),
@@ -347,6 +350,7 @@ function buildConfigPathsText(state: OrchRuntimeState): string {
 		`resolved.knowledgeBaseFile: ${resolvedPaths.knowledgeBaseFile}`,
 		`resolved.missionsDir: ${resolvedPaths.missionsDir}`,
 		`resolved.adaptationLogFile: ${resolvedPaths.adaptationLogFile}`,
+		`resolved.plansDir: ${resolvedPaths.plansDir}`,
 	].join("\n");
 }
 
