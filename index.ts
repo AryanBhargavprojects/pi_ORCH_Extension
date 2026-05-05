@@ -10,9 +10,11 @@ import { registerMissionCommand } from "./mission.js";
 import { registerPlanCommand } from "./plan.js";
 import { registerOrchMessageRenderer } from "./messages.js";
 import { registerOrchModelCommand } from "./model-command.js";
-import { clearOrchStatus, createRuntimeState, markSessionStart, setOrchStatus } from "./runtime.js";
+import { clearOrchStatus, createRuntimeState, markSessionStart, resetRuntimeTodos, setOrchStatus } from "./runtime.js";
 import { registerOrchLoadingIndicator } from "./loading.js";
 import { registerCompactToolRenderers } from "./tool-renderers.js";
+import { disposeOrchSubagentSessions } from "./role-runner.js";
+import { clearTodoUi, registerTodoWriteTool } from "./todos.js";
 
 export default function orchExtension(pi: ExtensionAPI): void {
 	const runtimeState = createRuntimeState();
@@ -20,6 +22,7 @@ export default function orchExtension(pi: ExtensionAPI): void {
 	registerOrchMessageRenderer(pi);
 	registerOrchLoadingIndicator(pi);
 	registerCompactToolRenderers(pi);
+	registerTodoWriteTool(pi, runtimeState);
 	registerOrchCommands(pi, runtimeState);
 	registerOrchFooter(pi, runtimeState);
 	registerOrchModelCommand(pi, runtimeState);
@@ -29,6 +32,7 @@ export default function orchExtension(pi: ExtensionAPI): void {
 	registerInteractiveOrch(pi, runtimeState);
 
 	pi.on("session_start", async (event, ctx) => {
+		resetRuntimeTodos(runtimeState);
 		runtimeState.configState = await loadOrchConfig(ctx.cwd);
 		markSessionStart(runtimeState, event.reason);
 		setOrchStatus(ctx, runtimeState);
@@ -52,7 +56,10 @@ export default function orchExtension(pi: ExtensionAPI): void {
 		if (runtimeState.activePlan) {
 			runtimeState.activePlan = undefined;
 		}
+		resetRuntimeTodos(runtimeState);
+		await disposeOrchSubagentSessions();
 		clearOrchStatus(ctx);
+		clearTodoUi(ctx);
 		if (ctx.hasUI) {
 			ctx.ui.setStatus("orch-mission", undefined);
 			ctx.ui.setStatus("orch-plan", undefined);

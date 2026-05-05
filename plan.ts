@@ -7,7 +7,7 @@ import { loadOrchConfig, type OrchLoadedConfig } from "./config.js";
 import { GLYPHS, ORCH_COMMANDS, ORCH_WIDGET_IDS } from "./constants.js";
 import { formatElapsed, SPINNER_FRAME_MS } from "./loading.js";
 import { emitOrchEvent, type OrchEventLevel } from "./messages.js";
-import type { PlanClarificationResult, PlanPhase, PlanResult } from "./plan-types.js";
+import type { PlanClarificationQuestion, PlanClarificationResult, PlanPhase, PlanResult } from "./plan-types.js";
 import {
 	createPlanId,
 	initializePlanState,
@@ -23,6 +23,12 @@ import { formatErrorMessage } from "./utils.js";
 const PLAN_STATUS_KEY = "orch-plan";
 const PLAN_RESEARCH_TOOLS = ["read", "bash", "grep", "find", "ls"];
 const PLAN_BASH_GUARD_REASON = "Plan Mode only allows read-only bash commands. Use read, grep, find, ls, or safe inspection commands.";
+const PLAN_CLARIFICATION_FALLBACK_OPTIONS = [
+	"Use the existing project conventions",
+	"Choose the safest/minimal default",
+	"Decide during implementation based on codebase evidence",
+	"Leave unspecified and use reasonable assumptions",
+] as const;
 type PlanContext = ExtensionCommandContext | ExtensionContext;
 type PlanModelRegistry = ExtensionContext["modelRegistry"];
 type OrchTheme = ExtensionCommandContext["ui"]["theme"];
@@ -266,7 +272,7 @@ async function runPlanWorkflow(
 		checkAborted(signal);
 
 		const clarifierResult = await runClarifierPass(goal, ctx.cwd, configState, ctx.modelRegistry, ctx, state, signal);
-		let questions: string[] = [];
+		let questions: PlanClarificationQuestion[] = [];
 		let assumptions: string[] = [];
 
 		if (clarifierResult) {
@@ -276,18 +282,16 @@ async function runPlanWorkflow(
 		}
 
 		let clarificationAnswers: string | undefined;
+		let interactiveAnswers: Array<{
+			question: string;
+			selectedOption?: string;
+			answer: string;
+			custom: boolean;
+			skipped: boolean;
+		}> = [];
 		if (questions.length > 0 && ctx.hasUI) {
-			const answerTemplate = [
-				"Answer any questions you can. Leave unknowns blank; Orch will continue with assumptions.",
-				"",
-				...questions.map((question, index) => `${index + 1}. ${question}`),
-				"",
-				"Answers:",
-			].join("\n");
-			const answers = await ctx.ui.editor("Plan clarification", answerTemplate);
-			if (answers && answers.trim().length > 0 && answers.trim() !== answerTemplate.trim()) {
-				clarificationAnswers = answers.trim();
-			}
+			interactiveAnswers = await collectInteractiveClarificationAnswers(ctx, questions, signal);
+			clarificationAnswers = compileClarificationAnswers(interactiveAnswers);
 		}
 
 		await writePlanArtifact(
@@ -298,6 +302,7 @@ async function runPlanWorkflow(
 					questions,
 					assumptions,
 					answers: clarificationAnswers ?? (questions.length > 0 ? "not provided" : null),
+					interactiveAnswers,
 				},
 				null,
 				2,
@@ -387,9 +392,11 @@ async function runClarifierPass(
 		"You may inspect the repository with read-only tools if needed.",
 		"Return strict JSON only. Do not wrap in markdown fences.",
 		"JSON shape:",
-		'{ "refinedGoal": "A clear, specific version of the goal", "needsClarification": true/false, "questions": ["question1"], "assumptions": ["assumption1"] }',
+		'{ "refinedGoal": "A clear, specific version of the goal", "needsClarification": true/false, "questions": [{ "question": "question1", "options": ["option1", "option2", "option3"] }], "assumptions": ["assumption1"] }',
 		"If the goal is already clear, set needsClarification to false and provide an empty questions array.",
-		"If the goal is ambiguous, set needsClarification to true and list specific questions.",
+		"If the goal is ambiguous, set needsClarification to true and ask only material questions.",
+		"For each question, provide 3-4 concrete suggested answer options in options.",
+		"Include a reasonable default or assumption option when possible.",
 		"Always provide at least one reasonable assumption.",
 	].join("\n");
 
@@ -609,7 +616,7 @@ function normalizeClarificationResult(output: string): PlanClarificationResult |
 	return {
 		refinedGoal: asNonEmptyString(parsed.refinedGoal) ?? "",
 		needsClarification: typeof parsed.needsClarification === "boolean" ? parsed.needsClarification : false,
-		questions: asStringArray(parsed.questions),
+		questions: asClarificationQuestions(parsed.questions),
 		assumptions: asStringArray(parsed.assumptions),
 	};
 }
@@ -741,6 +748,97 @@ function buildPlanningContext(refinedGoal: string, clarificationAnswers: string 
 		return refinedGoal;
 	}
 	return [refinedGoal, "", "User clarification answers:", clarificationAnswers].join("\n");
+}
+
+async function collectInteractiveClarificationAnswers(
+	ctx: PlanContext,
+	questions: PlanClarificationQuestion[],
+	signal?: AbortSignal,
+): Promise<Array<{
+	question: string;
+	selectedOption?: string;
+	answer: string;
+	custom: boolean;
+	skipped: boolean;
+}>> {
+	const customOption = "✎ Custom answer / add note";
+	const skipOption = "Use assumptions / skip";
+	const answers: Array<{
+		question: string;
+		selectedOption?: string;
+		answer: string;
+		custom: boolean;
+		skipped: boolean;
+	}> = [];
+
+	for (const [index, item] of questions.entries()) {
+		checkAborted(signal);
+
+		const options = [...item.options, customOption, skipOption];
+		const selected = await ctx.ui.select(`Plan clarification ${index + 1}/${questions.length}: ${item.question}`, options, { signal });
+
+		if (selected === customOption) {
+			const customAnswer = await ctx.ui.input(item.question, "Type a custom answer or note", { signal });
+			const answer = customAnswer?.trim();
+			if (answer) {
+				answers.push({
+					question: item.question,
+					answer,
+					custom: true,
+					skipped: false,
+				});
+			} else {
+				answers.push({
+					question: item.question,
+					answer: "not provided",
+					custom: true,
+					skipped: true,
+				});
+			}
+			continue;
+		}
+
+		if (!selected || selected === skipOption) {
+			answers.push({
+				question: item.question,
+				answer: "not provided",
+				custom: false,
+				skipped: true,
+			});
+			continue;
+		}
+
+		answers.push({
+			question: item.question,
+			selectedOption: selected,
+			answer: selected,
+			custom: false,
+			skipped: false,
+		});
+	}
+
+	return answers;
+}
+
+function compileClarificationAnswers(
+	interactiveAnswers: Array<{
+		question: string;
+		selectedOption?: string;
+		answer: string;
+		custom: boolean;
+		skipped: boolean;
+	}>,
+): string | undefined {
+	if (interactiveAnswers.length === 0) {
+		return undefined;
+	}
+
+	return interactiveAnswers
+		.map((item, index) => {
+			const answer = item.skipped ? "Use existing assumptions / not specified by user" : item.answer;
+			return `${index + 1}. ${item.question}\n   Answer: ${answer}`;
+		})
+		.join("\n");
 }
 
 function extractSummary(markdown: string): string {
@@ -1148,4 +1246,60 @@ function asStringArray(value: unknown): string[] {
 	return value
 		.map((item: unknown) => (typeof item === "string" ? item.trim() : undefined))
 		.filter((item): item is string => item !== undefined && item.length > 0);
+}
+
+function normalizeClarificationOption(value: string): string {
+	return value.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+}
+
+function ensureClarificationOptions(options: string[]): string[] {
+	const deduped: string[] = [];
+	const seen = new Set<string>();
+
+	for (const option of [...options, ...PLAN_CLARIFICATION_FALLBACK_OPTIONS]) {
+		const trimmed = option.trim();
+		if (trimmed.length === 0) {
+			continue;
+		}
+
+		const normalized = normalizeClarificationOption(trimmed);
+		if (seen.has(normalized)) {
+			continue;
+		}
+
+		seen.add(normalized);
+		deduped.push(trimmed);
+		if (deduped.length >= 4) {
+			break;
+		}
+	}
+
+	return deduped;
+}
+
+function asClarificationQuestions(value: unknown): PlanClarificationQuestion[] {
+	if (!Array.isArray(value)) {
+		return [];
+	}
+
+	return value
+		.map((item: unknown) => {
+			if (typeof item === "string") {
+				const question = item.trim();
+				return question.length > 0 ? { question, options: ensureClarificationOptions([]) } : undefined;
+			}
+
+			if (!isRecord(item)) {
+				return undefined;
+			}
+
+			const question = asNonEmptyString(item.question);
+			if (!question) {
+				return undefined;
+			}
+
+			const options = ensureClarificationOptions(asStringArray(item.options));
+			return { question, options };
+		})
+		.filter((item): item is PlanClarificationQuestion => item !== undefined);
 }

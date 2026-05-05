@@ -480,6 +480,11 @@ function renderCollapsedDelegationBuffer(buffer: DelegationBuffer, theme: OrchTh
 		return [buildSummaryLine(theme, theme.fg("error", buffer.finalSummary || "Delegate failed"), false)];
 	}
 
+	const warnings = getDelegationWarnings(buffer);
+	if (warnings.length > 0) {
+		return [buildSummaryLine(theme, theme.fg("warning", `! warning: ${warnings[0]?.title ?? "check delegation"}`), false)];
+	}
+
 	const parts = buildDelegationCountParts(buffer);
 	return [buildSummaryLine(theme, theme.fg("muted", parts.length > 0 ? parts.join(" • ") : "no tool calls"), false)];
 }
@@ -516,6 +521,17 @@ function renderExpandedDelegationBuffer(buffer: DelegationBuffer, theme: OrchThe
 			for (let index = 0; index < handoffLines.length; index++) {
 				const label = index === 0 ? "Handoff: " : "  ";
 				lines.push(`${waterfallPrefix}${theme.fg("dim", `${label}${handoffLines[index]}`)}`);
+			}
+		}
+		const warnings = getDelegationWarnings(buffer);
+		if (warnings.length > 0) {
+			for (const warning of warnings) {
+				lines.push(`${waterfallPrefix}${theme.fg("warning", `! ${warning.title}`)}`);
+				for (const line of warning.details.replace(/\r/g, "").split("\n")) {
+					if (line.trim().length > 0) {
+						lines.push(`${waterfallPrefix}${theme.fg("dim", `  ${line}`)}`);
+					}
+				}
 			}
 		}
 		if (buffer.finalIssues.length > 0) {
@@ -558,6 +574,10 @@ function renderDelegationEvent(event: DelegationEventKind, theme: OrchTheme, wat
 	];
 }
 
+function getDelegationWarnings(buffer: DelegationBuffer): Array<{ title: string; details: string }> {
+	return Array.isArray(buffer.finalWarnings) ? buffer.finalWarnings : [];
+}
+
 function buildDelegationCountParts(buffer: DelegationBuffer): string[] {
 	const parts: string[] = [];
 	if (buffer.edits > 0) {
@@ -597,7 +617,7 @@ function asDelegationBuffer(value: unknown): DelegationBuffer | undefined {
 	const status = record.status;
 	const role = record.role;
 	if (
-		(role !== "orchestrator" && role !== "worker" && role !== "validator") ||
+		(role !== "orchestrator" && role !== "worker" && role !== "validator" && role !== "smart_friend" && role !== "plan_clarifier" && role !== "plan_codebase" && role !== "plan_researcher" && role !== "plan_feasibility" && role !== "plan_synthesizer") ||
 		(status !== "running" && status !== "done" && status !== "failed" && status !== "aborted") ||
 		!Array.isArray(record.events)
 	) {

@@ -82,6 +82,14 @@ export type OrchActivePlan = {
 	backgroundPromise?: Promise<void>;
 };
 
+export type OrchTodoStatus = "pending" | "in_progress" | "completed";
+
+export type OrchTodoItem = {
+	id: string;
+	content: string;
+	status: OrchTodoStatus;
+};
+
 export type OrchRuntimeState = {
 	readonly bootId: string;
 	readonly version: string;
@@ -89,6 +97,8 @@ export type OrchRuntimeState = {
 	configState?: OrchLoadedConfig;
 	activeMission?: OrchActiveMission;
 	activePlan?: OrchActivePlan;
+	todos: OrchTodoItem[];
+	nextTodoId: number;
 	footer: OrchFooterRuntimeState;
 	lastSessionStartReason?: string;
 	lastSessionStartedAt?: string;
@@ -101,6 +111,8 @@ export function createRuntimeState(): OrchRuntimeState {
 		bootId: `orch-${loadedAt}`,
 		version: ORCH_EXTENSION_VERSION,
 		loadedAt,
+		todos: [],
+		nextTodoId: 1,
 		footer: {
 			toolActive: false,
 			turnHadError: false,
@@ -177,6 +189,63 @@ export function clearFooterToolActivity(state: OrchRuntimeState): void {
 	state.footer.toolActive = false;
 }
 
+export function resetRuntimeTodos(state: OrchRuntimeState): void {
+	state.todos = [];
+	state.nextTodoId = 1;
+}
+
+export function setRuntimeTodos(
+	state: OrchRuntimeState,
+	todos: Array<{ id?: string; content: string; status: OrchTodoStatus }>,
+): OrchTodoItem[] {
+	if (todos.length === 0) {
+		throw new Error("TodoWrite requires at least one todo item. Mark all todos completed instead of sending an empty list.");
+	}
+
+	const normalizedTodos: OrchTodoItem[] = [];
+	const seenIds = new Set<string>();
+	let nextTodoId = state.nextTodoId;
+	let maxNumericTodoId = 0;
+	let inProgressCount = 0;
+	let completedCount = 0;
+
+	for (const todo of todos) {
+		const content = todo.content.trim();
+		if (content.length === 0) {
+			throw new Error("TodoWrite requires every todo to have non-empty content.");
+		}
+
+		const providedId = todo.id?.trim();
+		const id = providedId && providedId.length > 0 ? providedId : `todo-${nextTodoId++}`;
+		if (seenIds.has(id)) {
+			throw new Error(`TodoWrite received duplicate todo id: ${id}`);
+		}
+		seenIds.add(id);
+
+		const numericMatch = /^todo-(\d+)$/.exec(id);
+		if (numericMatch) {
+			maxNumericTodoId = Math.max(maxNumericTodoId, Number(numericMatch[1]));
+		}
+
+		if (todo.status === "in_progress") {
+			inProgressCount++;
+		} else if (todo.status === "completed") {
+			completedCount++;
+		}
+
+		normalizedTodos.push({ id, content, status: todo.status });
+	}
+
+	const allCompleted = normalizedTodos.length > 0 && completedCount === normalizedTodos.length;
+	if (normalizedTodos.length > 0 && !allCompleted && inProgressCount !== 1) {
+		throw new Error("TodoWrite requires exactly one in_progress todo unless all todos are completed.");
+	}
+
+	state.todos = normalizedTodos;
+	state.nextTodoId = Math.max(nextTodoId, maxNumericTodoId + 1);
+	return state.todos;
+}
+
 export function formatRuntimeSummary(state: OrchRuntimeState, cwd: string): string {
 	const sessionReason = state.lastSessionStartReason ?? "unknown";
 	const sessionStartedAt = state.lastSessionStartedAt ?? "unknown";
@@ -218,6 +287,10 @@ export function formatRuntimeSummary(state: OrchRuntimeState, cwd: string): stri
 		if (state.activePlan.stateFilePath) {
 			lines.push(`planStateFile: ${state.activePlan.stateFilePath}`);
 		}
+	}
+
+	if (state.todos.length > 0) {
+		lines.push(`todos: ${state.todos.map((todo) => `${todo.id}[${todo.status}]=${todo.content}`).join(" | ")}`);
 	}
 
 	if (state.configState) {

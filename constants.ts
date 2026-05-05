@@ -1,6 +1,6 @@
 export const ORCH_EXTENSION_ID = "orch";
 export const ORCH_EXTENSION_NAME = "Orch";
-export const ORCH_EXTENSION_VERSION = "0.3.0";
+export const ORCH_EXTENSION_VERSION = "0.3.1";
 
 export const ORCH_COMMANDS = {
 	main: "orch",
@@ -38,6 +38,7 @@ export const GLYPHS = {
 export const ORCH_TOOL_NAMES = {
 	delegate: "orch_delegate",
 	smartFriend: "orch_smart_friend",
+	todoWrite: "TodoWrite",
 } as const;
 
 export const ORCH_WIDGET_IDS = {
@@ -46,4 +47,5 @@ export const ORCH_WIDGET_IDS = {
 	missionThinking: "orch-mission-thinking",
 	missionProgress: "orch-mission-progress",
 	planProgress: "orch-plan-progress",
+	todos: "orch-todos",
 } as const;

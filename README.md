@@ -5,7 +5,8 @@ Orch is a multi-agent orchestration extension for Pi.
 It adds:
 
 - interactive orchestrator behavior during normal chat
-- fresh-context sub-agents via `orch_delegate`
+- a Claude Code-like `TodoWrite` checklist for the main Pi orchestrator
+- Orch sub-agents via `orch_delegate` (validator runs are always fresh; other roles may reuse cached context)
 - orchestrator-only advisor guidance via `orch_smart_friend`
 - autonomous mission mode via `/mission`
 - an Orch control surface via `/orch` and `/orch-model`
@@ -65,8 +66,8 @@ That lets you iterate in-place and reload with `/reload`.
 - `model-command.ts` - `/orch-model` sub-agent model selector and persistence
 - `config.ts` - Orch config schema, defaults, validation, load/save helpers
 - `cmux-streaming.ts` - caller-anchored cmux worker/validator split-pane setup and raw role stream tailing
-- `interactive.ts` - default interactive orchestrator behavior plus `orch_delegate` and `orch_smart_friend`
-- `mission.ts` - autonomous `/mission` loop, planning, milestones, validation, fix-task steering, and the live mission block UI
+- `interactive.ts` - default interactive orchestrator behavior plus `TodoWrite`, `orch_delegate`, and `orch_smart_friend`
+- `mission.ts` - autonomous `/mission` loop, deterministic planning/steering, milestones, conditional validation, and the live mission block UI
 - `mission-state.ts` - live mission state directory I/O, state snapshots, feature status tracking
 - `mission-types.ts` - shared mission, milestone, fix-task, and state types
 - `plan.ts` - Plan Mode workflow, `/plan` command, Ctrl+\` shortcut, plan progress UI
@@ -79,7 +80,7 @@ That lets you iterate in-place and reload with `/reload`.
 - `prompts/worker.md` - worker system prompt
 - `prompts/validator.md` - validator system prompt
 - `prompts/smart-friend.md` - smart friend advisor system prompt
-- `role-runner.ts` - fresh-session Orch subagent spawner plus worker/validator wrappers
+- `role-runner.ts` - Orch subagent spawner plus worker/validator wrappers and non-validator session reuse
 - `runtime.ts` - runtime state plus footer/mission status helpers
 - `constants.ts` - shared metadata and command names
 - `utils.ts` - shared helpers for slug generation and error formatting
@@ -136,20 +137,24 @@ Mascot behavior:
 - `idle` when nothing is running
 - `thinking` during normal chat turns
 - `tool` while tools are executing
-- `orchestrator` during Orch planning/steering phases
+- `orchestrator` when the main Pi agent is coordinating Orch work
 - `worker` during feature execution phases
 - `validator` during validation phases
 - `success`, `error`, and `interrupted` as short transient reactions
 
 Additional custom tools:
 
-- `orch_delegate` - run a fresh Orch role session with:
-  - `orchestrator`
+- `TodoWrite` - maintain a short live checklist for multi-step work in the main Pi orchestrator session
+- `orch_delegate` - run an Orch role session with:
   - `worker`
   - `validator`
-- `orch_smart_friend` - ask a fresh read-only advisor for a second opinion when the orchestrator is stuck
+  - `plan_codebase`
+  - `plan_researcher`
+- `orch_smart_friend` - ask a read-only advisor for a second opinion when the orchestrator is stuck
 
-This gives the main conversational agent a way to delegate focused sub-tasks using the role-specific models from Orch config, and to consult a stronger read-only advisor when needed.
+This gives the main conversational agent a way to orchestrate directly, keep visible progress with todos, delegate focused sub-tasks using the role-specific models from Orch config, and consult a stronger read-only advisor when needed.
+
+Validation is conditional during normal orchestration unless a stricter mission-stage validation step is triggered.
 
 ## Sub-agent model configuration
 
@@ -162,7 +167,7 @@ Behavior:
 - reads the same Pi model registry used by `/model`
 - only shows models that are currently available/authenticated in Pi
 - lets the user choose which Orch role to configure:
-  - `orchestrator`
+  - `orchestrator` (main-agent prompt role metadata; not spawned as a sub-agent)
   - `worker`
   - `validator`
   - `smart_friend`
@@ -175,7 +180,7 @@ Behavior:
   - project scope
   - user scope
 - persists the selected provider/model pair into Orch config
-- the selected role models are then used by Orch sub-agents during delegation, `/mission`, and `/plan` runs
+- the selected worker/validator/smart-friend/plan role models are used by Orch sub-agents during delegation, `/mission`, and `/plan` runs
 
 Interactive flow:
 
@@ -200,7 +205,7 @@ Examples:
 
 ## Sub-agent architecture
 
-Orch sub-agents run as fresh Pi SDK sessions with isolated context.
+Orch validator sub-agents always run as fresh Pi SDK sessions with isolated context. Other Orch roles may reuse cached Pi SDK session context when the cwd/role/model/tool setup matches.
 
 Implemented pieces:
 
@@ -208,7 +213,7 @@ Implemented pieces:
 - **Worker sub-agent wrapper** - `runOrchWorkerSubagent()`
   - receives a feature spec plus mission shared-state context
   - implements the feature and any generated fix tasks
-  - returns a structured handoff for validator/orchestrator consumption
+  - returns a structured handoff for the main Pi orchestrator and validator consumption
 - **Validator sub-agent wrapper** - `runOrchValidatorSubagent()`
   - receives the worker handoff plus mission shared-state context
   - reviews the repository state
@@ -218,23 +223,22 @@ Implemented pieces:
   - roles can read the shared state files directly during execution
   - workers receive guidelines + knowledge base + feature status summary
   - validators receive knowledge base + feature status summary
-  - orchestrator steering receives the shared state snapshot for fix planning
+  - failed validation is converted into deterministic fix tasks without spawning an orchestrator sub-agent
 
 ## Autonomous mission mode
 
 `/mission <goal>` runs an isolated Orch loop:
 
-1. Orchestrator plans the mission
-2. Orchestrator decomposes the goal into features and milestone groups
-3. Orchestrator generates mission guidelines and a validation contract
-4. Orch creates a live mission state directory under `paths.missionsDir/<mission-id>/`
-5. Worker sub-agent executes each feature in fresh context
-6. Validator sub-agent reviews each feature in fresh context
-7. If validation fails, orchestrator generates explicit fix tasks and optional guideline updates
-8. Worker executes the fix tasks on the next attempt
-9. After each milestone, validator performs milestone-level validation
-10. Validator performs final mission validation
-11. Final mission record is written to `paths.missionsDir`
+1. The main Pi agent orchestrates the mission
+2. Orch creates a simple mission plan from the goal
+3. Orch creates a live mission state directory under `paths.missionsDir/<mission-id>/`
+4. Worker sub-agent executes each feature, usually reusing its cached role session context when the configuration matches
+5. Validator sub-agent reviews a feature only when conditional policy says validation is needed; validator runs are always fresh
+6. If validation fails, Orch generates deterministic fix tasks and optional follow-up instructions
+7. Worker executes the fix tasks on the next attempt
+8. After each milestone, validator performs milestone-level validation
+9. Validator performs final mission validation
+10. Final mission record is written to `paths.missionsDir`
 
 Phase 4 behavior now implemented:
 
@@ -273,7 +277,7 @@ Phase 4 behavior now implemented:
     - `state.json`
   - `features.json` tracks feature status with `pending`, `in-progress`, `done`, and `failed`
   - generated fix tasks are externalized into the feature state as mission-visible fix entries
-  - `knowledge-base.md` accumulates validator findings and orchestrator fix-plan notes
+  - `knowledge-base.md` accumulates validator findings and deterministic fix-plan notes
   - `guidelines.md` stores planning-time guidance plus steering-time updates
   - `state.json` is updated at phase transitions and powers live `/orch status` mission progress
 - **Milestones and milestone validation**
@@ -283,7 +287,7 @@ Phase 4 behavior now implemented:
 - **Fix-task loop**
   - validator failures now flow through an explicit loop:
     - validator flags issues
-    - orchestrator generates fix tasks
+    - Orch creates deterministic fix tasks without an orchestrator sub-agent
     - worker executes those fix tasks on the next attempt
 - **Minimal reactive footer**
   - the built-in footer is replaced by a single-line custom Orch footer
@@ -397,7 +401,7 @@ Files:
 - `prompts/plan_feasibility.md`
 - `prompts/plan_synthesizer.md`
 
-The interactive orchestrator prompt and fresh sub-agent sessions load from these files.
+The interactive orchestrator prompt and Orch sub-agent session behavior load from these files.
 
 ## Hot-reload dev workflow
 
@@ -412,6 +416,6 @@ The interactive orchestrator prompt and fresh sub-agent sessions load from these
 ## Notes
 
 - No build step is required for now; Pi loads the TypeScript directly via its extension loader.
-- Autonomous role sessions are created with the Pi SDK in fresh in-memory sessions.
+- Validator sessions are created with the Pi SDK in fresh in-memory sessions; other Orch roles may reuse cached in-memory sub-agent sessions until Orch shuts down.
 - Mission runs write a JSON mission record under the configured `missionsDir`.
 - While a mission is running, Orch also maintains a human-readable/live mission state directory under `paths.missionsDir/<mission-id>/`.

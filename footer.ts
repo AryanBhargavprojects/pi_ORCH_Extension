@@ -1,4 +1,4 @@
-import { supportsXhigh, type Model } from "@mariozechner/pi-ai";
+import { getSupportedThinkingLevels, type Model } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { type Component, truncateToWidth, type TUI, visibleWidth } from "@mariozechner/pi-tui";
 
@@ -210,12 +210,10 @@ function getDisplayedThinkingLevel(
 }
 
 function getAvailableThinkingLevels(model: Model<unknown> | undefined): Array<ReturnType<ExtensionAPI["getThinkingLevel"]>> {
-	if (!model?.reasoning) {
+	if (!model) {
 		return ["off"];
 	}
-	return supportsXhigh(model)
-		? ["off", "minimal", "low", "medium", "high", "xhigh"]
-		: ["off", "minimal", "low", "medium", "high"];
+	return getSupportedThinkingLevels(model) as Array<ReturnType<ExtensionAPI["getThinkingLevel"]>>;
 }
 
 function getThinkingLevelColor(

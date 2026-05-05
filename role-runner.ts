@@ -72,6 +72,8 @@ export type OrchSubagentResult = {
 		totalTokens: number;
 		costTotal: number;
 	};
+	toolCalls: number;
+	elapsedMs: number;
 };
 
 export type OrchWorkerSubagentRequest = {
@@ -105,41 +107,37 @@ export type OrchValidatorSubagentRequest = {
 const ORCHESTRATOR_TOOLS = ["read", "bash", "grep", "find", "ls"];
 const WORKER_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const VALIDATOR_TOOLS = ["read", "grep", "find", "ls"];
+const PLAN_CODEBASE_TOOLS = ["read", "grep", "find", "ls"];
 const SMART_FRIEND_TOOLS = ["read", "bash", "grep", "find", "ls"];
+const DEFAULT_SUBAGENT_BASH_TIMEOUT_SECONDS = 120;
 const VALIDATOR_STREAMS_DIR_NAME = ".streams";
+const WORKER_SESSION_RESET_POLICY: CachedSessionResetPolicy = { maxRuns: 5, maxTotalTokens: 60000 };
+const NON_WORKER_SESSION_RESET_POLICY: CachedSessionResetPolicy = { maxRuns: 3, maxTotalTokens: 40000 };
+
+type OrchSubagentSession = Awaited<ReturnType<typeof createAgentSession>>["session"];
+type CachedOrchSubagentSession = {
+	session: OrchSubagentSession;
+	boundExtensions: boolean;
+	runCount: number;
+	totalTokens: number;
+};
+
+type CachedSessionResetPolicy = {
+	maxRuns: number;
+	maxTotalTokens: number;
+};
+
+const orchSubagentSessionCache = new Map<string, CachedOrchSubagentSession>();
 
 export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<OrchSubagentResult> {
+	const startedAt = Date.now();
 	const modelConfig = request.configState.merged.roles[request.role];
 	const model = resolveConfiguredModel(request.modelRegistry, modelConfig.provider, modelConfig.model, request.role);
-	const rolePrompt = await loadOrchRolePrompt(request.role);
-	const settingsManager = SettingsManager.inMemory({
-		compaction: { enabled: false },
-	});
-	const resourceLoader = new DefaultResourceLoader({
-		cwd: request.cwd,
-		agentDir: getAgentDir(),
-		settingsManager,
-		noExtensions: true,
-		noSkills: true,
-		noPromptTemplates: true,
-		noThemes: true,
-		systemPromptOverride: (base) => [rolePrompt, base].filter(Boolean).join("\n\n"),
-	});
-	await resourceLoader.reload();
-
-	const { session } = await createAgentSession({
-		cwd: request.cwd,
-		model,
-		modelRegistry: request.modelRegistry,
-		resourceLoader,
-		tools: (request.toolNames ?? getRoleTools(request.role)) as any,
-		customTools: getRoleToolOverrides(request),
-		sessionManager: SessionManager.inMemory(request.cwd),
-		settingsManager,
-	});
+	const { session, isCached, boundExtensions, cacheKey } = await getOrCreateOrchSubagentSession(request, model);
 
 	const toolArgsById = new Map<string, { toolName: string; args: unknown }>();
 	let streamedText = "";
+	let toolCallCount = 0;
 	const unsubscribe = session.subscribe((event) => {
 		if (event.type === "tool_execution_start") {
 			toolArgsById.set(event.toolCallId, { toolName: event.toolName, args: event.args });
@@ -147,6 +145,7 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 		}
 
 		if (event.type === "tool_execution_end") {
+			toolCallCount++;
 			const started = toolArgsById.get(event.toolCallId);
 			toolArgsById.delete(event.toolCallId);
 			request.onStreamEvent?.({
@@ -181,7 +180,9 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 		}
 	});
 
+	let wasAborted = false;
 	const abortHandler = () => {
+		wasAborted = true;
 		request.onStreamEvent?.({ role: request.role, type: "status", status: "aborted" });
 		void session.abort().catch(() => {
 			// Ignore abort races.
@@ -198,32 +199,57 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 
 	try {
 		request.onStreamEvent?.({ role: request.role, type: "status", status: "starting" });
-		await session.bindExtensions({});
+		if (!isCached || !boundExtensions) {
+			await session.bindExtensions({});
+			if (isCached && cacheKey) {
+				const cachedSession = orchSubagentSessionCache.get(cacheKey);
+				if (cachedSession?.session === session) {
+					cachedSession.boundExtensions = true;
+				}
+			}
+		}
 		await session.prompt(request.prompt);
+		if (wasAborted || request.signal?.aborted) {
+			throw new Error(`Orch ${request.role} sub-agent aborted.`);
+		}
 		request.onStreamEvent?.({ role: request.role, type: "status", status: "completed" });
 		const assistantMessage = findLastAssistantMessage(session.messages);
 		const output = findLastAssistantText(session.messages) ?? streamedText.trim();
+
+		const usage = {
+			input: assistantMessage?.usage?.input ?? 0,
+			output: assistantMessage?.usage?.output ?? 0,
+			cacheRead: assistantMessage?.usage?.cacheRead ?? 0,
+			cacheWrite: assistantMessage?.usage?.cacheWrite ?? 0,
+			totalTokens: assistantMessage?.usage?.totalTokens ?? 0,
+			costTotal: assistantMessage?.usage?.cost?.total ?? 0,
+		};
+		if (isCached && cacheKey) {
+			updateCachedSessionCounters(cacheKey, session, request.role, usage.totalTokens);
+		}
 
 		return {
 			role: request.role,
 			provider: model.provider,
 			modelId: model.id,
 			output,
-			usage: {
-				input: assistantMessage?.usage?.input ?? 0,
-				output: assistantMessage?.usage?.output ?? 0,
-				cacheRead: assistantMessage?.usage?.cacheRead ?? 0,
-				cacheWrite: assistantMessage?.usage?.cacheWrite ?? 0,
-				totalTokens: assistantMessage?.usage?.totalTokens ?? 0,
-				costTotal: assistantMessage?.usage?.cost?.total ?? 0,
-			},
+			usage,
+			toolCalls: toolCallCount,
+			elapsedMs: Date.now() - startedAt,
 		};
+	} catch (error) {
+		if (isCached && cacheKey) {
+			await evictCachedOrchSubagentSession(cacheKey, session);
+		}
+		throw error;
 	} finally {
 		unsubscribe();
 		if (request.signal) {
 			request.signal.removeEventListener("abort", abortHandler);
 		}
-		session.dispose();
+		if (!isCached) {
+			session.dispose();
+		}
 	}
 }
 
@@ -249,6 +275,141 @@ export async function runOrchValidatorSubagent(request: OrchValidatorSubagentReq
 		signal: request.signal,
 		onStreamEvent: request.onStreamEvent,
 	});
+}
+
+export async function disposeOrchSubagentSessions(): Promise<void> {
+	const sessions = [...orchSubagentSessionCache.values()];
+	orchSubagentSessionCache.clear();
+	for (const { session } of sessions) {
+		session.dispose();
+	}
+}
+
+async function getOrCreateOrchSubagentSession(request: OrchSubagentRequest, model: Model<Api>): Promise<{
+	session: OrchSubagentSession;
+	isCached: boolean;
+	boundExtensions: boolean;
+	cacheKey?: string;
+}> {
+	if (request.role === "validator") {
+		return {
+			session: await createFreshOrchSubagentSession(request, model),
+			isCached: false,
+			boundExtensions: false,
+		};
+	}
+
+	const cacheKey = getOrchSubagentSessionCacheKey(request, model);
+	const cached = orchSubagentSessionCache.get(cacheKey);
+	if (cached) {
+		const resetPolicy = getCachedSessionResetPolicy(request.role);
+		if (!resetPolicy || !shouldResetCachedSession(cached, resetPolicy)) {
+			return {
+				session: cached.session,
+				isCached: true,
+				boundExtensions: cached.boundExtensions,
+				cacheKey,
+			};
+		}
+		await evictCachedOrchSubagentSession(cacheKey, cached.session);
+	}
+
+	const session = await createFreshOrchSubagentSession(request, model);
+	orchSubagentSessionCache.set(cacheKey, { session, boundExtensions: false, runCount: 0, totalTokens: 0 });
+	return {
+		session,
+		isCached: true,
+		boundExtensions: false,
+		cacheKey,
+	};
+}
+
+async function createFreshOrchSubagentSession(request: OrchSubagentRequest, model: Model<Api>): Promise<OrchSubagentSession> {
+	const rolePrompt = await loadOrchRolePrompt(request.role);
+	const settingsManager = SettingsManager.inMemory({
+		compaction: { enabled: false },
+	});
+	const resourceLoader = new DefaultResourceLoader({
+		cwd: request.cwd,
+		agentDir: getAgentDir(),
+		settingsManager,
+		noExtensions: true,
+		noSkills: true,
+		noPromptTemplates: true,
+		noThemes: true,
+		systemPromptOverride: (base) => [rolePrompt, base].filter(Boolean).join("\n\n"),
+	});
+	await resourceLoader.reload();
+
+	const { session } = await createAgentSession({
+		cwd: request.cwd,
+		model,
+		modelRegistry: request.modelRegistry,
+		resourceLoader,
+		tools: getRequestedTools(request) as any,
+		customTools: getRoleToolOverrides(request),
+		sessionManager: SessionManager.inMemory(request.cwd),
+		settingsManager,
+	});
+
+	return session;
+}
+
+function getOrchSubagentSessionCacheKey(request: OrchSubagentRequest, model: Model<Api>): string {
+	return JSON.stringify({
+		cwd: request.cwd,
+		role: request.role,
+		provider: model.provider,
+		modelId: model.id,
+		toolNames: getRequestedTools(request),
+		hasBashCommandGuard: Boolean(request.bashCommandGuard),
+		bashGuardReason: request.bashGuardReason ?? null,
+	});
+}
+
+function getRequestedTools(request: OrchSubagentRequest): string[] {
+	return request.toolNames ?? getRoleTools(request.role);
+}
+
+function getCachedSessionResetPolicy(role: OrchRoleName): CachedSessionResetPolicy | undefined {
+	switch (role) {
+		case "worker":
+			return WORKER_SESSION_RESET_POLICY;
+		case "validator":
+			return undefined;
+		default:
+			return NON_WORKER_SESSION_RESET_POLICY;
+	}
+}
+
+function shouldResetCachedSession(
+	cached: CachedOrchSubagentSession,
+	policy: CachedSessionResetPolicy,
+): boolean {
+	return cached.runCount >= policy.maxRuns || cached.totalTokens >= policy.maxTotalTokens;
+}
+
+function updateCachedSessionCounters(cacheKey: string, session: OrchSubagentSession, role: OrchRoleName, totalTokens: number): void {
+	const cached = orchSubagentSessionCache.get(cacheKey);
+	if (!cached || cached.session !== session) {
+		return;
+	}
+	cached.runCount += 1;
+	cached.totalTokens += totalTokens;
+	const resetPolicy = getCachedSessionResetPolicy(role);
+	if (resetPolicy && shouldResetCachedSession(cached, resetPolicy)) {
+		orchSubagentSessionCache.delete(cacheKey);
+		session.dispose();
+	}
+}
+
+async function evictCachedOrchSubagentSession(cacheKey: string, session: OrchSubagentSession): Promise<void> {
+	const cached = orchSubagentSessionCache.get(cacheKey);
+	if (cached?.session !== session) {
+		return;
+	}
+	orchSubagentSessionCache.delete(cacheKey);
+	session.dispose();
 }
 
 function resolveConfiguredModel(
@@ -278,7 +439,9 @@ function getRoleTools(role: OrchRoleName): string[] {
 		case "smart_friend":
 			return SMART_FRIEND_TOOLS;
 		case "plan_clarifier":
+			return ORCHESTRATOR_TOOLS;
 		case "plan_codebase":
+			return PLAN_CODEBASE_TOOLS;
 		case "plan_researcher":
 		case "plan_feasibility":
 		case "plan_synthesizer":
@@ -415,18 +578,27 @@ function truncateOneLine(value: string, maxLength: number): string {
 function getRoleToolOverrides(request: OrchSubagentRequest) {
 	const overrides: any[] = [];
 
-	if (request.bashCommandGuard) {
+	if (getRequestedTools(request).includes("bash")) {
 		const bashTool = createBashToolDefinition(request.cwd);
 		overrides.push({
 			...bashTool,
 			async execute(toolCallId, params, signal, onUpdate, ctx) {
-				if (!request.bashCommandGuard?.(params.command)) {
+				if (request.bashCommandGuard && !request.bashCommandGuard(params.command)) {
 					throw new Error(
 						request.bashGuardReason ??
 							`Command blocked by Orch ${request.role} bash guard: ${params.command}`,
 					);
 				}
-				return bashTool.execute(toolCallId, params, signal, onUpdate, ctx);
+				return bashTool.execute(
+					toolCallId,
+					{
+						...params,
+						timeout: typeof params.timeout === "number" ? params.timeout : DEFAULT_SUBAGENT_BASH_TIMEOUT_SECONDS,
+					},
+					signal,
+					onUpdate,
+					ctx,
+				);
 			},
 		});
 	}

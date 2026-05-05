@@ -29,8 +29,6 @@ import {
 	type MissionStatus,
 	type SteeringResult,
 	type ValidationContract,
-	type ValidationCriterion,
-	type ValidationCriterionType,
 	type ValidationIssue,
 	type ValidationIssueSeverity,
 	type ValidationResult,
@@ -306,7 +304,7 @@ async function runAutonomousMission(
 	const startedAt = state.activeMission?.startedAt ?? new Date().toISOString();
 	const missionId = state.activeMission?.id ?? createMissionId(goal, startedAt);
 	const models = {
-		orchestrator: formatRoleModel(configState, "orchestrator"),
+		orchestrator: "main Pi agent",
 		worker: formatRoleModel(configState, "worker"),
 		validator: formatRoleModel(configState, "validator"),
 	};
@@ -315,7 +313,7 @@ async function runAutonomousMission(
 		pi,
 		ctx,
 		"Mission started",
-		[`Goal: ${goal}`, `Mission ID: ${missionId}`, `Models: ${models.orchestrator} | ${models.worker} | ${models.validator}`].join(
+		[`Goal: ${goal}`, `Mission ID: ${missionId}`, "Orchestrator: main Pi agent", `Sub-agent models: ${models.worker} | ${models.validator}`].join(
 			"\n",
 		),
 		"info",
@@ -324,7 +322,7 @@ async function runAutonomousMission(
 	setMissionStatus(ctx, state, "planning mission");
 
 	writeCmuxRoleMarker(state.activeMission?.cmuxStreaming, "orchestrator", "Mission planning");
-	const plan = await generateMissionPlan(goal, ctx.cwd, configState, ctx, state);
+	const plan = generateMissionPlan(goal);
 	const missionState = await initializeMissionState(
 		configState.resolvedPaths.missionsDir,
 		missionId,
@@ -516,38 +514,44 @@ async function runAutonomousMission(
 				}
 				emitWorkerChanges(pi, ctx, workerResult.changes);
 
-				setMissionStatus(ctx, state, `validating ${feature.title} (attempt ${attempt})`);
+				const shouldValidate = shouldRunConditionalValidation(goal, feature, workerResult, attempt);
+				setMissionStatus(ctx, state, `${shouldValidate ? "validating" : "skipping validation for"} ${feature.title} (attempt ${attempt})`);
 				await syncMissionLiveState({
-					phase: `validating ${feature.title}`,
+					phase: `${shouldValidate ? "validating" : "skipping validation for"} ${feature.title}`,
 					currentFeatureIndex: featureIndex,
 					currentFeatureId: feature.id,
 					currentAttempt: attempt,
 					currentMilestoneId: milestone.id,
 				});
-				const validatorSharedState = await buildMissionPromptSharedState(missionState, "validator", milestone.id);
-				writeCmuxRoleMarker(
-					state.activeMission?.cmuxStreaming,
-					"validator",
-					`${feature.title} • attempt ${attempt}`,
-				);
-				const validationExecution = await runOrchValidatorSubagent({
-					goal,
-					missionSummary: plan.summary,
-					feature,
-					validationContract: plan.validationContract,
-					sharedState: validatorSharedState,
-					workerRun: workerResult,
-					cwd: ctx.cwd,
-					configState,
-					modelRegistry: ctx.modelRegistry,
-					signal: state.activeMission?.abortController.signal,
-					onStreamEvent: (event) => handleSubagentStreamEvent(ctx, state, event),
-				});
-				const validationResult = normalizeValidationResult(
-					validationExecution.output,
-					validationExecution.provider,
-					validationExecution.modelId,
-				);
+				let validationResult: ValidationResult;
+				if (shouldValidate) {
+					const validatorSharedState = await buildMissionPromptSharedState(missionState, "validator", milestone.id);
+					writeCmuxRoleMarker(
+						state.activeMission?.cmuxStreaming,
+						"validator",
+						`${feature.title} • attempt ${attempt}`,
+					);
+					const validationExecution = await runOrchValidatorSubagent({
+						goal,
+						missionSummary: plan.summary,
+						feature,
+						validationContract: plan.validationContract,
+						sharedState: validatorSharedState,
+						workerRun: workerResult,
+						cwd: ctx.cwd,
+						configState,
+						modelRegistry: ctx.modelRegistry,
+						signal: state.activeMission?.abortController.signal,
+						onStreamEvent: (event) => handleSubagentStreamEvent(ctx, state, event),
+					});
+					validationResult = normalizeValidationResult(
+						validationExecution.output,
+						validationExecution.provider,
+						validationExecution.modelId,
+					);
+				} else {
+					validationResult = createSkippedValidationResult(feature, workerResult, attempt);
+				}
 				await appendMissionKnowledgeBase(
 					missionState,
 					`Feature: ${feature.title} • attempt ${attempt}`,
@@ -605,38 +609,12 @@ async function runAutonomousMission(
 				}
 
 				if (attempt < MAX_ATTEMPTS_PER_FEATURE) {
-					const orchestratorSharedState = await buildMissionPromptSharedState(
-						missionState,
-						"orchestrator",
-						milestone.id,
-					);
 					writeCmuxRoleMarker(
 						state.activeMission?.cmuxStreaming,
 						"orchestrator",
 						`Steering for ${feature.title} • attempt ${attempt}`,
 					);
-					const steeringExecution = await spawnOrchSubagent({
-						role: "orchestrator",
-						prompt: buildSteeringPrompt(
-							goal,
-							plan,
-							milestone,
-							feature,
-							workerResult,
-							validationResult,
-							orchestratorSharedState,
-						),
-						cwd: ctx.cwd,
-						configState,
-						modelRegistry: ctx.modelRegistry,
-						signal: state.activeMission?.abortController.signal,
-						onStreamEvent: (event) => handleSubagentStreamEvent(ctx, state, event),
-					});
-					steering = normalizeSteeringResult(
-						steeringExecution.output,
-						steeringExecution.provider,
-						steeringExecution.modelId,
-					);
+					steering = buildDeterministicSteeringResult(feature, validationResult);
 					attemptRecord.steering = steering;
 					activeFixTaskIds = await syncMissionFixTasks(
 						feature.id,
@@ -835,103 +813,148 @@ async function runAutonomousMission(
 	};
 }
 
-async function generateMissionPlan(
-	goal: string,
-	cwd: string,
-	configState: OrchLoadedConfig,
-	ctx: ExtensionCommandContext,
-	state: OrchRuntimeState,
-): Promise<MissionPlan> {
-	const execution = await spawnOrchSubagent({
-		role: "orchestrator",
-		prompt: buildMissionPlanPrompt(goal, cwd),
-		cwd,
-		configState,
-		modelRegistry: ctx.modelRegistry,
-		signal: state.activeMission?.abortController.signal,
-		onStreamEvent: (event) => handleSubagentStreamEvent(ctx, state, event),
-	});
-
-	return normalizeMissionPlan(execution.output, goal);
+function generateMissionPlan(goal: string): MissionPlan {
+	const missionTitle = goal.length <= 80 ? goal : `${goal.slice(0, 77).trimEnd()}...`;
+	return {
+		missionTitle,
+		summary: goal,
+		guidelines: [
+			"The main Pi agent is the orchestrator for this mission.",
+			"Execute the goal as one focused feature unless validation requires a follow-up pass.",
+			"Keep changes scoped to the stated goal and verify with relevant checks when practical.",
+		],
+		features: [
+			{
+				id: "feature-1",
+				title: missionTitle,
+				goal,
+				deliverables: [goal],
+				dependencies: [],
+				notes: [],
+			},
+		],
+		milestones: [
+			{
+				id: "milestone-1",
+				title: missionTitle,
+				summary: goal,
+				featureIds: ["feature-1"],
+				validationTrigger: "Validate when the feature is complete or when conditional validation policy requires it.",
+				notes: [],
+			},
+		],
+		validationContract: {
+			summary: `Confirm the repository changes satisfy: ${goal}`,
+			criteria: [
+				{
+					id: "criterion-1",
+					title: "Goal satisfied",
+					description: goal,
+					type: "behavior",
+				},
+				{
+					id: "criterion-2",
+					title: "Relevant verification recorded",
+					description: "Worker reports the checks that were run or clearly states verification limitations.",
+					type: "review",
+				},
+			],
+		},
+		notes: [],
+		rawOutput: JSON.stringify({ goal }),
+	};
 }
 
-function buildMissionPlanPrompt(goal: string, cwd: string): string {
-	return [
-		"Plan an autonomous coding mission for the following goal.",
-		`Goal: ${goal}`,
-		`Working directory: ${cwd}`,
-		"You may inspect the repository with read-only tools before planning.",
-		"Return strict JSON only. Do not wrap the JSON in markdown fences.",
-		"JSON shape:",
-		"{",
-		'  "missionTitle": "string",',
-		'  "summary": "string",',
-		'  "guidelines": ["string"],',
-		'  "features": [',
-		"    {",
-		'      "id": "feature-1",',
-		'      "title": "string",',
-		'      "goal": "string",',
-		'      "deliverables": ["string"],',
-		'      "dependencies": ["feature-x"],',
-		'      "notes": ["string"]',
-		"    }",
-		"  ],",
-		'  "milestones": [',
-		"    {",
-		'      "id": "milestone-1",',
-		'      "title": "string",',
-		'      "summary": "string",',
-		'      "featureIds": ["feature-1"],',
-		'      "validationTrigger": "string",',
-		'      "notes": ["string"]',
-		"    }",
-		"  ],",
-		'  "validationContract": {',
-		'    "summary": "string",',
-		'    "criteria": [',
-		"      {",
-		'        "id": "criterion-1",',
-		'        "title": "string",',
-		'        "description": "string",',
-		'        "type": "behavior|test|file|review"',
-		"      }",
-		"    ]",
-		"  },",
-		'  "notes": ["string"]',
-		"}",
-		`Rules: 1-${MAX_FEATURES} features, each feature must be independently executable by a fresh worker context. Group features into milestones of at most ${MAX_FEATURES_PER_MILESTONE} planned features where practical. Return concrete mission guidelines and milestone validation triggers.`,
-	].join("\n");
-}
-
-function buildSteeringPrompt(
+function shouldRunConditionalValidation(
 	goal: string,
-	plan: MissionPlan,
-	milestone: MissionMilestone,
 	feature: MissionFeature,
 	workerResult: WorkerRun,
-	validationResult: ValidationResult,
-	sharedState: MissionPromptSharedState,
-): string {
-	return [
-		"Generate a concrete fix-task plan after a failed validation pass.",
-		`Mission goal: ${goal}`,
-		`Mission summary: ${plan.summary}`,
-		`Milestone: ${milestone.title}`,
-		`Feature title: ${feature.title}`,
-		`Feature goal: ${feature.goal}`,
-		"Worker summary:",
-		workerResult.summary,
-		"Worker handoff:",
-		workerResult.handoff,
-		"Validator findings:",
-		validationResult.summary,
-		...validationResult.issues.map((issue) => `- [${issue.severity}] ${issue.title}: ${issue.details} | action: ${issue.action}`),
-		...buildSharedStatePromptSection(sharedState, true),
-		"Return strict JSON only with this shape:",
-		'{ "summary": "string", "instructions": ["string"], "fixTasks": [{ "id": "fix-task-1", "title": "string", "instructions": ["string"], "deliverables": ["string"], "notes": ["string"] }], "guidelineUpdates": ["string"] }',
-		"Generate fix tasks that a fresh worker can execute immediately. Keep the instructions concrete and implementation-focused.",
-	].join("\n");
+	attempt: number,
+): boolean {
+	if (attempt > 1) return true;
+	if (workerResult.followUps.length > 0 || workerResult.notes.length > 0) return true;
+	if (workerResult.testsRun.length === 0) return true;
+	if (workerResult.testsRun.some((test) => /\b(fail(?:ed)?|error|not run|skipped|timeout)\b/i.test(test))) return true;
+	if (workerResult.changes.length >= 5) return true;
+	return hasRiskyValidationContext(goal, feature, workerResult);
+}
+
+function hasRiskyValidationContext(goal: string, feature: MissionFeature, workerResult: WorkerRun): boolean {
+	const taskText = [goal, feature.goal, feature.title, ...feature.deliverables, ...feature.notes].join("\n");
+	const changeText = workerResult.changes.join("\n");
+	const combinedText = `${taskText}\n${changeText}`;
+
+	if (/\b(auth|oauth|security|permission|credential|secret|token|session|payment|payments|billing)\b/i.test(combinedText)) {
+		return true;
+	}
+	if (/\b(migration|schema|database|postgres|mysql|sqlite|sql|prisma|drizzle|supabase)\b/i.test(combinedText)) {
+		return true;
+	}
+	if (workerResult.changes.some(isRiskyChangedPath)) {
+		return true;
+	}
+	return hasRiskyDeleteContext(combinedText);
+}
+
+function isRiskyChangedPath(change: string): boolean {
+	const pathLike = change.split(":", 1)[0] ?? change;
+	if (/\.(md|mdx|txt|rst)$/i.test(pathLike)) {
+		return false;
+	}
+	return /(^|\/)(auth|security|permissions?|payments?|billing|db|database|migrations?|prisma|drizzle|supabase)(\/|$)|\.(sql)$/i.test(pathLike);
+}
+
+function hasRiskyDeleteContext(text: string): boolean {
+	const deleteVerb = "(?:delete|remove|drop|truncate|destroy)";
+	const riskyTarget = "(?:data|database|db|table|record|row|user|account|file|directory|payment|auth|migration|schema)";
+	return new RegExp(`\\b${deleteVerb}\\b.{0,50}\\b${riskyTarget}\\b|\\b${riskyTarget}\\b.{0,50}\\b${deleteVerb}\\b`, "i").test(text);
+}
+
+function createSkippedValidationResult(feature: MissionFeature, workerResult: WorkerRun, attempt: number): ValidationResult {
+	const summary = `Validator skipped by conditional policy for ${feature.title} on attempt ${attempt}; accepting worker handoff without a fresh validator pass.`;
+	return {
+		passed: true,
+		summary,
+		issues: [],
+		evidence: [
+			workerResult.summary,
+			...(workerResult.testsRun.length > 0 ? workerResult.testsRun.map((test) => `Worker check: ${test}`) : ["Worker reported no tests."]),
+		],
+		rawOutput: summary,
+		provider: "conditional-policy",
+		modelId: "validator-skipped",
+	};
+}
+
+function buildDeterministicSteeringResult(feature: MissionFeature, validationResult: ValidationResult): SteeringResult {
+	const instructions = validationResult.issues.map((issue) => `${issue.title}: ${issue.action}`);
+	const fixTasks = validationResult.issues.map((issue, index) => ({
+		id: `fix-task-${index + 1}`,
+		title: issue.title,
+		instructions: [issue.action, issue.details],
+		deliverables: [`Resolve validator issue: ${issue.title}`],
+		notes: [`Severity: ${issue.severity}`, `Feature: ${feature.title}`],
+	}));
+	const summary = validationResult.summary.trim().length > 0
+		? validationResult.summary
+		: `Address ${validationResult.issues.length} validator finding${validationResult.issues.length === 1 ? "" : "s"} for ${feature.title}.`;
+	return {
+		summary,
+		instructions: instructions.length > 0 ? instructions : ["Review the validator summary and address the reported gaps."],
+		fixTasks: fixTasks.length > 0
+			? fixTasks
+			: [{
+				id: "fix-task-1",
+				title: `Address validator findings for ${feature.title}`,
+				instructions: [validationResult.summary || "Review the validator summary and address the reported gaps."],
+				deliverables: ["All validator findings addressed"],
+				notes: [],
+			}],
+		guidelineUpdates: [],
+		rawOutput: JSON.stringify({ summary, instructions, issueCount: validationResult.issues.length }),
+		provider: "deterministic",
+		modelId: "orchestrator-steering",
+	};
 }
 
 function buildMilestoneValidationPrompt(
@@ -1049,161 +1072,6 @@ function buildMilestoneKnowledgeBaseLines(validationResult: ValidationResult): s
 	];
 }
 
-function normalizeMissionPlan(output: string, goal: string): MissionPlan {
-	const fallbackFeatures: MissionFeature[] = [
-		{
-			id: "feature-1",
-			title: goal.slice(0, 80),
-			goal,
-			deliverables: [goal],
-			dependencies: [],
-			notes: [],
-		},
-	];
-	const fallback: MissionPlan = {
-		missionTitle: goal.slice(0, 80),
-		summary: goal,
-		guidelines: [],
-		features: fallbackFeatures,
-		milestones: createDefaultMilestones(fallbackFeatures),
-		validationContract: {
-			summary: "Complete the requested goal and verify the changed behavior.",
-			criteria: [
-				{
-					id: "criterion-1",
-					title: "Goal satisfied",
-					description: "The implemented result should satisfy the user goal.",
-					type: "behavior",
-				},
-			],
-		},
-		notes: [],
-		rawOutput: output,
-	};
-
-	const parsed = parseJsonObject(output);
-	if (!isRecord(parsed)) {
-		return fallback;
-	}
-
-	const featuresValue = Array.isArray(parsed.features) ? parsed.features : [];
-	const features = featuresValue
-		.slice(0, MAX_FEATURES)
-		.map((feature, index) => normalizeMissionFeature(feature, index + 1))
-		.filter((feature): feature is MissionFeature => feature !== undefined);
-	const normalizedFeatures = features.length > 0 ? features : fallback.features;
-	const validationContract = normalizeValidationContract(parsed.validationContract);
-	const milestones = normalizeMissionMilestones(parsed.milestones, normalizedFeatures);
-
-	return {
-		missionTitle: asNonEmptyString(parsed.missionTitle) ?? fallback.missionTitle,
-		summary: asNonEmptyString(parsed.summary) ?? fallback.summary,
-		guidelines: asStringArray(parsed.guidelines),
-		features: normalizedFeatures,
-		milestones,
-		validationContract: validationContract ?? fallback.validationContract,
-		notes: asStringArray(parsed.notes),
-		rawOutput: output,
-	};
-}
-
-function normalizeMissionFeature(value: unknown, index: number): MissionFeature | undefined {
-	if (!isRecord(value)) return undefined;
-	const title = asNonEmptyString(value.title) ?? `Feature ${index}`;
-	return {
-		id: asNonEmptyString(value.id) ?? `feature-${index}`,
-		title,
-		goal: asNonEmptyString(value.goal) ?? title,
-		deliverables: asStringArray(value.deliverables),
-		dependencies: asStringArray(value.dependencies),
-		notes: asStringArray(value.notes),
-	};
-}
-
-function normalizeMissionMilestones(value: unknown, features: MissionFeature[]): MissionMilestone[] {
-	if (!Array.isArray(value)) {
-		return createDefaultMilestones(features);
-	}
-
-	const featureIdSet = new Set(features.map((feature) => feature.id));
-	const milestones = value
-		.map((milestone, index) => normalizeMissionMilestone(milestone, index + 1, featureIdSet))
-		.filter((milestone): milestone is MissionMilestone => milestone !== undefined);
-	const coveredFeatureIds = new Set(milestones.flatMap((milestone) => milestone.featureIds));
-	const missingFeatures = features.filter((feature) => !coveredFeatureIds.has(feature.id));
-	if (missingFeatures.length === 0 && milestones.length > 0) {
-		return milestones;
-	}
-
-	return [...milestones, ...createDefaultMilestones(missingFeatures, milestones.length + 1)];
-}
-
-function normalizeMissionMilestone(
-	value: unknown,
-	index: number,
-	featureIdSet: Set<string>,
-): MissionMilestone | undefined {
-	if (!isRecord(value)) return undefined;
-	const title = asNonEmptyString(value.title) ?? `Milestone ${index}`;
-	const featureIds = asStringArray(value.featureIds).filter((featureId) => featureIdSet.has(featureId));
-	if (featureIds.length === 0) {
-		return undefined;
-	}
-	return {
-		id: asNonEmptyString(value.id) ?? `milestone-${index}`,
-		title,
-		summary: asNonEmptyString(value.summary) ?? title,
-		featureIds,
-		validationTrigger: asNonEmptyString(value.validationTrigger) ?? `Validate ${title} before proceeding.`,
-		notes: asStringArray(value.notes),
-	};
-}
-
-function createDefaultMilestones(features: MissionFeature[], startIndex = 1): MissionMilestone[] {
-	const milestones: MissionMilestone[] = [];
-	for (let index = 0; index < features.length; index += MAX_FEATURES_PER_MILESTONE) {
-		const chunk = features.slice(index, index + MAX_FEATURES_PER_MILESTONE);
-		const milestoneIndex = startIndex + milestones.length;
-		milestones.push({
-			id: `milestone-${milestoneIndex}`,
-			title: `Milestone ${milestoneIndex}`,
-			summary: chunk.map((feature) => feature.title).join("; "),
-			featureIds: chunk.map((feature) => feature.id),
-			validationTrigger: `Validate milestone ${milestoneIndex} after completing ${chunk.map((feature) => feature.title).join(", ")}.`,
-			notes: [],
-		});
-	}
-	return milestones;
-}
-
-function normalizeValidationContract(value: unknown): ValidationContract | undefined {
-	if (!isRecord(value)) return undefined;
-	const criteria = Array.isArray(value.criteria)
-		? value.criteria
-				.map((criterion, index) => normalizeValidationCriterion(criterion, index + 1))
-				.filter((criterion): criterion is ValidationCriterion => criterion !== undefined)
-		: [];
-	if (criteria.length === 0) {
-		return undefined;
-	}
-	return {
-		summary: asNonEmptyString(value.summary) ?? "Validation contract",
-		criteria,
-	};
-}
-
-function normalizeValidationCriterion(value: unknown, index: number): ValidationCriterion | undefined {
-	if (!isRecord(value)) return undefined;
-	const type = asValidationCriterionType(value.type) ?? "behavior";
-	const title = asNonEmptyString(value.title) ?? `Criterion ${index}`;
-	return {
-		id: asNonEmptyString(value.id) ?? `criterion-${index}`,
-		title,
-		description: asNonEmptyString(value.description) ?? title,
-		type,
-	};
-}
-
 function normalizeWorkerRun(output: string, provider: string, modelId: string): WorkerRun {
 	const parsed = parseJsonObject(output);
 	if (!isRecord(parsed)) {
@@ -1280,70 +1148,6 @@ function normalizeValidationIssue(value: unknown, index: number): ValidationIssu
 		title,
 		details: asNonEmptyString(value.details) ?? title,
 		action: asNonEmptyString(value.action) ?? "Investigate and resolve the issue.",
-	};
-}
-
-function normalizeSteeringResult(output: string, provider: string, modelId: string): SteeringResult {
-	const parsed = parseJsonObject(output);
-	if (!isRecord(parsed)) {
-		return {
-			summary: output.trim() || "Provide a focused follow-up implementation pass.",
-			instructions: [output.trim() || "Review validator feedback and address the missing requirements."],
-			fixTasks: [
-				{
-					id: "fix-task-1",
-					title: "Address validator findings",
-					instructions: [output.trim() || "Review validator feedback and address the missing requirements."],
-					deliverables: ["All validator findings addressed"],
-					notes: [],
-				},
-			],
-			guidelineUpdates: [],
-			rawOutput: output,
-			provider,
-			modelId,
-		};
-	}
-	const instructions = asStringArray(parsed.instructions);
-	const fixTasks = Array.isArray(parsed.fixTasks)
-		? parsed.fixTasks
-				.map((task, index) => normalizeFixTask(task, index + 1))
-				.filter((task): task is MissionFixTask => task !== undefined)
-		: [];
-	return {
-		summary: asNonEmptyString(parsed.summary) ?? "Provide a focused follow-up implementation pass.",
-		instructions: instructions.length > 0 ? instructions : ["Address the validator issues and re-check the feature."],
-		fixTasks:
-			fixTasks.length > 0
-				? fixTasks
-				: [
-					{
-						id: "fix-task-1",
-						title: "Address validator findings",
-						instructions:
-							instructions.length > 0
-								? instructions
-								: ["Address the validator issues and re-check the feature."],
-						deliverables: ["All validator findings addressed"],
-						notes: [],
-					},
-				],
-		guidelineUpdates: asStringArray(parsed.guidelineUpdates),
-		rawOutput: output,
-		provider,
-		modelId,
-	};
-}
-
-function normalizeFixTask(value: unknown, index: number): MissionFixTask | undefined {
-	if (!isRecord(value)) return undefined;
-	const title = asNonEmptyString(value.title) ?? `Fix task ${index}`;
-	return {
-		id: asNonEmptyString(value.id) ?? `fix-task-${index}`,
-		title,
-		instructions: asStringArray(value.instructions),
-		deliverables: asStringArray(value.deliverables),
-		notes: asStringArray(value.notes),
 	};
 }
 
@@ -1804,7 +1608,7 @@ function setMissionStatus(ctx: ExtensionCommandContext, state: OrchRuntimeState,
 	setOrchStatus(ctx, state);
 }
 
-function formatRoleModel(configState: OrchLoadedConfig, role: "orchestrator" | "worker" | "validator"): string {
+function formatRoleModel(configState: OrchLoadedConfig, role: "worker" | "validator"): string {
 	const model = configState.merged.roles[role];
 	return `${model.provider}/${model.model}`;
 }
@@ -1828,13 +1632,6 @@ function asStringArray(value: unknown): string[] {
 	return value
 		.map((item) => (typeof item === "string" ? item.trim() : undefined))
 		.filter((item): item is string => item !== undefined && item.length > 0);
-}
-
-function asValidationCriterionType(value: unknown): ValidationCriterionType | undefined {
-	if (value === "behavior" || value === "test" || value === "file" || value === "review") {
-		return value;
-	}
-	return undefined;
 }
 
 function asValidationIssueSeverity(value: unknown): ValidationIssueSeverity | undefined {

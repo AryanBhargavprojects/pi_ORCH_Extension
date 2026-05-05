@@ -8,10 +8,15 @@ export type PlanPhase =
 	| "cancelled"
 	| "failed";
 
+export type PlanClarificationQuestion = {
+	question: string;
+	options: string[];
+};
+
 export type PlanClarificationResult = {
 	refinedGoal: string;
 	needsClarification: boolean;
-	questions: string[];
+	questions: PlanClarificationQuestion[];
 	assumptions: string[];
 };
 

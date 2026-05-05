@@ -29,6 +29,7 @@ export type DelegationBuffer = {
 	finalSummary: string;
 	finalHandoff: string;
 	finalIssues: Array<{ severity: string; title: string; details: string }>;
+	finalWarnings: Array<{ title: string; details: string }>;
 	issueCount: number;
 };
 
