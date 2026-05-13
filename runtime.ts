@@ -256,12 +256,12 @@ export function formatRuntimeSummary(state: OrchRuntimeState, cwd: string): stri
 		`sessionReason: ${sessionReason}`,
 		`sessionStartedAt: ${sessionStartedAt}`,
 		`cwd: ${cwd}`,
-		`commands: /${ORCH_COMMANDS.main} | /${ORCH_COMMANDS.model} | /${ORCH_COMMANDS.mission} | /${ORCH_COMMANDS.plan} | /${ORCH_COMMANDS.status} | /${ORCH_COMMANDS.reload} | /${ORCH_COMMANDS.takeover} | /reload`,
+		`commands: /${ORCH_COMMANDS.main} | /${ORCH_COMMANDS.main} ${ORCH_COMMANDS.goal} <goal> | /${ORCH_COMMANDS.model} | /${ORCH_COMMANDS.plan} | /${ORCH_COMMANDS.status} | /${ORCH_COMMANDS.reload} | /${ORCH_COMMANDS.takeover} | /reload`,
 	];
 
 	if (state.activeMission) {
-		lines.push(`activeMission: ${state.activeMission.goal}`);
-		lines.push(`activeMissionPhase: ${state.activeMission.phase}`);
+		lines.push(`activeGoal: ${state.activeMission.goal}`);
+		lines.push(`activeGoalPhase: ${state.activeMission.phase}`);
 		lines.push(`takeoverCommands: /${ORCH_COMMANDS.main} takeover | /${ORCH_COMMANDS.takeover}`);
 		if (state.activeMission.stateDir) {
 			lines.push(`missionStateDir: ${state.activeMission.stateDir}`);

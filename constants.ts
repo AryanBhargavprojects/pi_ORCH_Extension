@@ -1,10 +1,10 @@
 export const ORCH_EXTENSION_ID = "orch";
 export const ORCH_EXTENSION_NAME = "Orch";
-export const ORCH_EXTENSION_VERSION = "0.3.1";
+export const ORCH_EXTENSION_VERSION = "0.4.0";
 
 export const ORCH_COMMANDS = {
 	main: "orch",
-	mission: "mission",
+	goal: "goal",
 	plan: "plan",
 	model: "orch-model",
 	status: "orch-status",

@@ -9,6 +9,7 @@ import type { DelegationBuffer, DelegationEventKind } from "./mission-types.js";
 import { loadOrchRolePrompt } from "./prompt-loader.js";
 import { spawnOrchSubagent, type OrchSubagentStreamEvent } from "./role-runner.js";
 import type { OrchRuntimeState } from "./runtime.js";
+import { TINYFISH_TOOL_NAME } from "./tinyfish.js";
 import {
 	renderDelegateCall,
 	renderDelegateResult,
@@ -21,7 +22,7 @@ const DELEGATE_ROLE_NAMES = ["worker", "validator", "plan_codebase", "plan_resea
 type DelegateRoleName = (typeof DELEGATE_ROLE_NAMES)[number];
 
 const INTERACTIVE_CODEBASE_TOOLS = ["read", "grep", "find", "ls"] as const;
-const INTERACTIVE_RESEARCH_TOOLS = ["read", "bash", "grep", "find", "ls"] as const;
+const INTERACTIVE_RESEARCH_TOOLS = ["read", "bash", "grep", "find", "ls", TINYFISH_TOOL_NAME] as const;
 const INTERACTIVE_RESEARCH_BASH_GUARD_REASON = "Interactive research delegation only allows read-only bash commands. Use read, grep, find, ls, or safe inspection/fetch commands.";
 const FAST_ZERO_TOOL_WARNING_MS = 2000;
 
@@ -255,11 +256,12 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 			"Use delegation when it is likely to save main-context tokens or wall-clock time; otherwise work directly in the main Pi agent.",
 			"Use orch_delegate role=plan_codebase for broad repository/codebase reading, architecture discovery, multi-file inspection, or unfamiliar project analysis.",
 			"Use orch_delegate role=plan_researcher for documentation research only when local knowledge or quick direct reads are not enough.",
+			"Use tinyfish for current web search, online source lookup, live website extraction, scraping, and source-backed web research.",
 			"Use main-session built-in tools for simple inspection or straightforward edits when that is the fastest path.",
 			`Use ${ORCH_TOOL_NAMES.delegate} role=worker for focused implementation and role=validator for separate review only when risk or uncertainty justifies it.`,
 			`Use ${ORCH_TOOL_NAMES.smartFriend} when you are genuinely stuck and need a read-only advisor to inspect the repo independently; it may reuse cached Orch context.`,
 			"Do not spawn or request an orchestrator sub-agent for orchestration. The main Pi agent is already the orchestrator.",
-			"Do not silently switch into autonomous mission mode. Full autonomous execution only begins when the user explicitly invokes /mission.",
+			"Do not silently switch into autonomous goal mode. Full autonomous execution only begins when the user explicitly invokes /orch goal.",
 			`Configured Orch sub-agent models: worker=${config.roles.worker.provider}/${config.roles.worker.model}, validator=${config.roles.validator.provider}/${config.roles.validator.model}, smart_friend=${config.roles.smart_friend.provider}/${config.roles.smart_friend.model}, plan_codebase=${config.roles.plan_codebase.provider}/${config.roles.plan_codebase.model}, plan_researcher=${config.roles.plan_researcher.provider}/${config.roles.plan_researcher.model}.`,
 		].join("\n\n");
 
@@ -305,8 +307,8 @@ function buildInteractiveDelegationPrompt(role: DelegateRoleName, task: string):
 			].join("\n");
 		case "plan_researcher":
 			return [
-				"Interactive delegation mode: perform documentation, framework, package, SDK, API, or official-docs research. This Orch role may reuse cached context, so re-check sources when precision matters.",
-				"Stay read-only. You may inspect repository docs and use only safe read-only/fetch commands for external docs when needed.",
+				"Interactive delegation mode: perform documentation, framework, package, SDK, API, official-docs, or web research. This Orch role may reuse cached context, so re-check sources when precision matters.",
+				"Stay read-only. You may inspect repository docs, use tinyfish for web search/live website extraction, and use only safe read-only/fetch commands for external docs when needed.",
 				"Prefer official documentation and cite URLs when external lookup is available. If external lookup is unavailable or blocked, state that limitation clearly.",
 				"Return a concise markdown report with relevant documentation, API patterns, caveats, sources/limitations, and implementation implications.",
 				"",
@@ -684,14 +686,14 @@ function buildSmartFriendMissionContext(state: OrchRuntimeState): string[] {
 	}
 
 	const lines = [
-		"Active mission context:",
-		`- Mission id: ${activeMission.id}`,
+		"Active goal context:",
+		`- Goal id: ${activeMission.id}`,
 		`- Goal: ${activeMission.goal}`,
 		`- Phase: ${activeMission.phase}`,
 	];
 
 	if (activeMission.stateDir) {
-		lines.push(`- Mission state directory: ${activeMission.stateDir}`);
+		lines.push(`- Goal state directory: ${activeMission.stateDir}`);
 		lines.push(`- Plan file: ${activeMission.stateDir}/plan.json`);
 		lines.push(`- Features file: ${activeMission.stateDir}/features.json`);
 		lines.push(`- Validation contract file: ${activeMission.stateDir}/validation-contract.md`);

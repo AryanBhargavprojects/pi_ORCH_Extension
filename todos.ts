@@ -3,6 +3,7 @@ import { Type } from "@sinclair/typebox";
 import { Text } from "@mariozechner/pi-tui";
 
 import { ORCH_TOOL_NAMES, ORCH_WIDGET_IDS } from "./constants.js";
+import { syncCmuxTodos } from "./cmux-integration.js";
 import {
 	setOrchStatus,
 	setRuntimeTodos,
@@ -49,6 +50,7 @@ export function registerTodoWriteTool(pi: ExtensionAPI, state: OrchRuntimeState)
 			const todos = setRuntimeTodos(state, params.todos);
 			setOrchStatus(ctx, state);
 			updateTodoUi(ctx, todos);
+			syncCmuxTodos(todos);
 			const summary = summarizeTodos(todos);
 			return {
 				content: [{ type: "text", text: summary }],

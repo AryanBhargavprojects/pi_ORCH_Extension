@@ -27,6 +27,7 @@ import type {
 } from "./mission-types.js";
 import { buildSharedStatePromptSection } from "./mission-state.js";
 import { loadOrchRolePrompt } from "./prompt-loader.js";
+import { createTinyFishToolDefinition, TINYFISH_TOOL_NAME } from "./tinyfish.js";
 
 export type OrchSubagentStreamEvent =
 	| {
@@ -108,6 +109,7 @@ const ORCHESTRATOR_TOOLS = ["read", "bash", "grep", "find", "ls"];
 const WORKER_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const VALIDATOR_TOOLS = ["read", "grep", "find", "ls"];
 const PLAN_CODEBASE_TOOLS = ["read", "grep", "find", "ls"];
+const PLAN_RESEARCHER_TOOLS = ["read", "bash", "grep", "find", "ls", TINYFISH_TOOL_NAME];
 const SMART_FRIEND_TOOLS = ["read", "bash", "grep", "find", "ls"];
 const DEFAULT_SUBAGENT_BASH_TIMEOUT_SECONDS = 120;
 const VALIDATOR_STREAMS_DIR_NAME = ".streams";
@@ -443,6 +445,7 @@ function getRoleTools(role: OrchRoleName): string[] {
 		case "plan_codebase":
 			return PLAN_CODEBASE_TOOLS;
 		case "plan_researcher":
+			return PLAN_RESEARCHER_TOOLS;
 		case "plan_feasibility":
 		case "plan_synthesizer":
 			return ORCHESTRATOR_TOOLS;
@@ -465,6 +468,8 @@ function formatSubagentToolLabel(toolName: string): string {
 			return "Find";
 		case "ls":
 			return "List";
+		case TINYFISH_TOOL_NAME:
+			return "TinyFish";
 		default:
 			return toolName.length > 0 ? `${toolName.slice(0, 1).toUpperCase()}${toolName.slice(1)}` : "Tool";
 	}
@@ -505,6 +510,11 @@ function formatSubagentToolDetail(toolName: string, args: unknown, result: unkno
 			const target = asString(input?.path) ?? asString(input?.pattern) ?? ".";
 			const count = countMeaningfulLines(output);
 			return `${target} • ${count} ${count === 1 ? "result" : "results"}`;
+		}
+		case TINYFISH_TOOL_NAME: {
+			const target = asString(input?.url) ?? asString(input?.query) ?? "web";
+			const summary = output.length > 0 ? truncateOneLine(getFirstMeaningfulLine(output) ?? output, 100) : statusPrefix;
+			return `${target} • ${summary}`;
 		}
 		default:
 			return output.length > 0 ? truncateOneLine(getFirstMeaningfulLine(output) ?? output, 100) : statusPrefix;
@@ -577,6 +587,10 @@ function truncateOneLine(value: string, maxLength: number): string {
 
 function getRoleToolOverrides(request: OrchSubagentRequest) {
 	const overrides: any[] = [];
+
+	if (getRequestedTools(request).includes(TINYFISH_TOOL_NAME)) {
+		overrides.push(createTinyFishToolDefinition());
+	}
 
 	if (getRequestedTools(request).includes("bash")) {
 		const bashTool = createBashToolDefinition(request.cwd);
@@ -820,8 +834,8 @@ function buildWorkerSubagentPrompt(request: OrchWorkerSubagentRequest): string {
 
 	return [
 		"Execute the assigned Orch worker feature and prepare a validator-ready handoff.",
-		`Mission goal: ${request.goal}`,
-		`Mission summary: ${request.missionSummary}`,
+		`Goal: ${request.goal}`,
+		`Goal summary: ${request.missionSummary}`,
 		`Feature ID: ${request.feature.id}`,
 		`Feature title: ${request.feature.title}`,
 		`Feature goal: ${request.feature.goal}`,
@@ -840,7 +854,7 @@ function buildWorkerSubagentPrompt(request: OrchWorkerSubagentRequest): string {
 		"Fix tasks created from the latest validator findings:",
 		...fixTaskLines,
 		"You may edit files and run commands as needed, but stay within this feature's scope.",
-		"You may also read and update the shared mission-state files when they help coordination, documentation, or handoff quality.",
+		"You may also read and update the shared goal-state files when they help coordination, documentation, or handoff quality.",
 		"Return strict JSON only with this shape:",
 		'{ "summary": "string", "changes": ["path: description"], "testsRun": ["string"], "notes": ["string"], "followUps": ["string"], "handoff": "string" }',
 		"The handoff must help a fresh validator understand what changed, what was verified, and what still needs scrutiny.",
@@ -853,9 +867,9 @@ function buildValidatorSubagentPrompt(request: OrchValidatorSubagentRequest): st
 	);
 
 	return [
-		"Validate a worker handoff for a single Orch mission feature.",
-		`Mission goal: ${request.goal}`,
-		`Mission summary: ${request.missionSummary}`,
+		"Validate a worker handoff for a single Orch goal feature.",
+		`Goal: ${request.goal}`,
+		`Goal summary: ${request.missionSummary}`,
 		`Feature ID: ${request.feature.id}`,
 		`Feature title: ${request.feature.title}`,
 		`Feature goal: ${request.feature.goal}`,

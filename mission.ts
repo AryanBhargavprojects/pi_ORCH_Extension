@@ -10,6 +10,7 @@ import {
 	setupCmuxMissionStreaming,
 	writeCmuxRoleMarker,
 } from "./cmux-streaming.js";
+import { completeCmuxMission, syncCmuxMissionStatus } from "./cmux-integration.js";
 import { GLYPHS, ORCH_COMMANDS, ORCH_WIDGET_IDS } from "./constants.js";
 import {
 	type FeatureAttemptRecord,
@@ -61,7 +62,7 @@ import {
 	type OrchPendingTakeoverPrompt,
 	type OrchRuntimeState,
 } from "./runtime.js";
-import { formatErrorMessage, slugifyText } from "./utils.js";
+import { formatErrorMessage, isAbortLikeError, slugifyText } from "./utils.js";
 
 const MAX_FEATURES = 6;
 const MAX_FEATURES_PER_MILESTONE = 2;
@@ -113,74 +114,84 @@ export function requestMissionTakeover(
 	return true;
 }
 
-export function registerMissionCommand(pi: ExtensionAPI, state: OrchRuntimeState): void {
-	pi.registerCommand(ORCH_COMMANDS.mission, {
-		description: "Run Orch autonomous mission mode",
-		handler: async (args, ctx) => {
-			await ctx.waitForIdle();
+export function registerGoalCommand(pi: ExtensionAPI, state: OrchRuntimeState): void {
+	registerMissionInputTakeover(pi, state);
+}
 
-			if (state.activeMission) {
-				reportMissionEvent(
-					pi,
-					ctx,
-					"Mission already running",
-					`Active mission: ${state.activeMission.goal}\nUse /orch takeover or /${ORCH_COMMANDS.takeover} to interrupt it first.`,
-					"warning",
-					"mission",
-				);
-				return;
-			}
+export async function runOrchGoalCommand(
+	pi: ExtensionAPI,
+	args: string,
+	ctx: ExtensionCommandContext,
+	state: OrchRuntimeState,
+): Promise<void> {
+	await ctx.waitForIdle();
 
-			const goal = await resolveMissionGoal(args, ctx);
-			if (!goal) {
-				reportMissionEvent(
-					pi,
-					ctx,
-					"Mission usage",
-					`Use /${ORCH_COMMANDS.mission} <goal> to start an autonomous mission.`,
-					"warning",
-					"mission",
-				);
-				return;
-			}
+	if (state.activeMission) {
+		reportMissionEvent(
+			pi,
+			ctx,
+			"Goal already running",
+			`Active goal: ${state.activeMission.goal}\nUse /orch takeover or /${ORCH_COMMANDS.takeover} to interrupt it first.`,
+			"warning",
+			"mission",
+		);
+		return;
+	}
 
-			state.configState = await loadOrchConfig(ctx.cwd);
+	const goal = await resolveMissionGoal(args, ctx);
+	if (!goal) {
+		reportMissionEvent(
+			pi,
+			ctx,
+			"Goal usage",
+			`Use /${ORCH_COMMANDS.main} ${ORCH_COMMANDS.goal} <goal> to start an autonomous Orch goal.`,
+			"warning",
+			"mission",
+		);
+		return;
+	}
 
-			if (!ctx.hasUI) {
-				try {
-					const result = await runAutonomousMission(pi, ctx, goal, state.configState, state);
-					reportMissionEvent(
-						pi,
-						ctx,
-						"Mission complete",
-						buildMissionCompletionText(result),
-						result.record.status === "completed" ? "success" : "warning",
-						"mission",
-					);
-					emitMissionRecap(pi, ctx, `mission ${result.record.status === "completed" ? "completed" : "needs attention"}`);
-				} catch (error) {
-					reportMissionEvent(pi, ctx, "Mission failed", formatErrorMessage(error), "error", "mission");
-					emitMissionRecap(pi, ctx, "mission failed");
-				} finally {
-					setMissionStatus(ctx, state, undefined);
-					clearMissionThinkingWidget(ctx);
-				}
-				return;
-			}
+	state.configState = await loadOrchConfig(ctx.cwd);
 
-			startMissionInBackground(pi, ctx, goal, state, state.configState);
+	if (!ctx.hasUI) {
+		try {
+			const result = await runAutonomousMission(pi, ctx, goal, state.configState, state);
+			const completionText = buildMissionCompletionText(result);
 			reportMissionEvent(
 				pi,
 				ctx,
-				"Mission running",
-				`Started autonomous mission for: ${goal}\nUse /orch takeover, /${ORCH_COMMANDS.takeover}, or type a normal prompt to interrupt and take over.`,
-				"info",
+				"Goal complete",
+				completionText,
+				result.record.status === "completed" ? "success" : "warning",
 				"mission",
 			);
-		},
-	});
+			completeCmuxMission(result.record.status === "completed" ? "completed" : "needs-attention", goal, completionText);
+			emitMissionRecap(pi, ctx, `goal ${result.record.status === "completed" ? "completed" : "needs attention"}`);
+		} catch (error) {
+			const message = formatErrorMessage(error);
+			const interrupted = isAbortLikeError(error);
+			reportMissionEvent(pi, ctx, interrupted ? "Goal interrupted" : "Goal failed", message, interrupted ? "warning" : "error", "mission");
+			completeCmuxMission(interrupted ? "interrupted" : "failed", goal, message);
+			emitMissionRecap(pi, ctx, interrupted ? "goal interrupted" : "goal failed");
+		} finally {
+			setMissionStatus(ctx, state, undefined);
+			clearMissionThinkingWidget(ctx);
+		}
+		return;
+	}
 
+	startMissionInBackground(pi, ctx, goal, state, state.configState);
+	reportMissionEvent(
+		pi,
+		ctx,
+		"Goal running",
+		`Started autonomous goal for: ${goal}\nUse /orch takeover, /${ORCH_COMMANDS.takeover}, or type a normal prompt to interrupt and take over.`,
+		"info",
+		"mission",
+	);
+}
 
+function registerMissionInputTakeover(pi: ExtensionAPI, state: OrchRuntimeState): void {
 	pi.on("input", async (event, ctx) => {
 		if (!state.activeMission) {
 			return { action: "continue" };
@@ -201,7 +212,7 @@ export function registerMissionCommand(pi: ExtensionAPI, state: OrchRuntimeState
 			images: takeoverImages,
 		});
 		if (ctx.hasUI) {
-			ctx.ui.notify("Interrupting the active Orch mission. Your prompt will be delivered after takeover.", "warning");
+			ctx.ui.notify("Interrupting the active Orch goal. Your prompt will be delivered after takeover.", "warning");
 		}
 		return { action: "handled" };
 	});
@@ -220,7 +231,7 @@ function startMissionInBackground(
 		goal,
 		startedAt,
 		abortController: new AbortController(),
-		phase: "planning mission",
+		phase: "planning goal",
 		orchestratorThinking: "",
 		orchestratorText: "",
 		takeoverRequested: false,
@@ -244,39 +255,45 @@ function startMissionInBackground(
 				);
 			}
 			const result = await runAutonomousMission(pi, ctx, goal, configState, state);
+			const completionText = buildMissionCompletionText(result);
 			setFooterTransientMood(state, result.record.status === "completed" ? "success" : "error", 1800);
 			reportMissionEvent(
 				pi,
 				ctx,
-				"Mission complete",
-				buildMissionCompletionText(result),
+				"Goal complete",
+				completionText,
 				result.record.status === "completed" ? "success" : "warning",
 				"mission",
 			);
-			emitMissionRecap(pi, ctx, `mission ${result.record.status === "completed" ? "completed" : "needs attention"}`);
+			completeCmuxMission(result.record.status === "completed" ? "completed" : "needs-attention", goal, completionText);
+			emitMissionRecap(pi, ctx, `goal ${result.record.status === "completed" ? "completed" : "needs attention"}`);
 		} catch (error) {
 			if (mission.abortController.signal.aborted) {
+				const message = mission.takeoverRequested
+					? "Autonomous goal interrupted. Returning control to the user."
+					: "Autonomous goal interrupted.";
 				setFooterTransientMood(state, "interrupted", 1800);
 				reportMissionEvent(
 					pi,
 					ctx,
-					"Mission interrupted",
-					mission.takeoverRequested
-						? "Autonomous mission interrupted. Returning control to the user."
-						: "Autonomous mission interrupted.",
+					"Goal interrupted",
+					message,
 					"warning",
 					"mission",
 				);
-				emitMissionRecap(pi, ctx, "mission interrupted");
+				completeCmuxMission("interrupted", goal, message);
+				emitMissionRecap(pi, ctx, "goal interrupted");
 			} else {
+				const message = formatErrorMessage(error);
 				setFooterTransientMood(state, "error", 2200);
-				reportMissionEvent(pi, ctx, "Mission failed", formatErrorMessage(error), "error", "mission");
+				reportMissionEvent(pi, ctx, "Goal failed", message, "error", "mission");
+				completeCmuxMission("failed", goal, message);
 			}
 		} finally {
 			const pendingTakeover = state.activeMission === mission ? mission.pendingTakeover : undefined;
 			await cleanupCmuxMissionStreaming(
 				mission.cmuxStreaming,
-				mission.takeoverRequested ? "Mission interrupted" : "Mission finished",
+				mission.takeoverRequested ? "Goal interrupted" : "Goal finished",
 			);
 			if (state.activeMission === mission) {
 				state.activeMission = undefined;
@@ -290,7 +307,7 @@ function startMissionInBackground(
 	})();
 
 	void mission.backgroundPromise.catch(() => {
-		// Background errors are reported inside the mission lifecycle.
+		// Background errors are reported inside the goal lifecycle.
 	});
 }
 
@@ -312,16 +329,16 @@ async function runAutonomousMission(
 	reportMissionEvent(
 		pi,
 		ctx,
-		"Mission started",
-		[`Goal: ${goal}`, `Mission ID: ${missionId}`, "Orchestrator: main Pi agent", `Sub-agent models: ${models.worker} | ${models.validator}`].join(
+		"Goal started",
+		[`Goal: ${goal}`, `Goal ID: ${missionId}`, "Orchestrator: main Pi agent", `Sub-agent models: ${models.worker} | ${models.validator}`].join(
 			"\n",
 		),
 		"info",
 		"plan",
 	);
-	setMissionStatus(ctx, state, "planning mission");
+	setMissionStatus(ctx, state, "planning goal");
 
-	writeCmuxRoleMarker(state.activeMission?.cmuxStreaming, "orchestrator", "Mission planning");
+	writeCmuxRoleMarker(state.activeMission?.cmuxStreaming, "orchestrator", "Goal planning");
 	const plan = generateMissionPlan(goal);
 	const missionState = await initializeMissionState(
 		configState.resolvedPaths.missionsDir,
@@ -338,13 +355,13 @@ async function runAutonomousMission(
 	let progressFeaturesState = await readMissionFeaturesStateFromFile(missionState.paths.featuresFile);
 	let progressLiveState = await readMissionLiveStateFromFile(missionState.paths.stateFile);
 	const renderMissionWidget = (): void => {
-		if (!ctx.hasUI) {
-			return;
-		}
 		if (state.activeMission) {
 			state.activeMission.featuresState = progressFeaturesState;
 			state.activeMission.liveState = progressLiveState;
-			updateMissionThinkingWidget(ctx, state.activeMission);
+			syncCmuxMissionStatus(state, state.activeMission.phase);
+			if (ctx.hasUI) {
+				updateMissionThinkingWidget(ctx, state.activeMission);
+			}
 		}
 	};
 	const syncMissionLiveState = async (patch: Parameters<typeof updateMissionRuntimeState>[1]): Promise<void> => {
@@ -386,7 +403,7 @@ async function runAutonomousMission(
 
 	renderMissionWidget();
 	await syncMissionLiveState({
-		phase: "executing mission",
+		phase: "executing goal",
 		currentFeatureIndex: null,
 		currentFeatureId: null,
 		currentAttempt: null,
@@ -396,7 +413,7 @@ async function runAutonomousMission(
 	reportMissionEvent(
 		pi,
 		ctx,
-		"Mission plan ready",
+		"Goal plan ready",
 		[
 			plan.missionTitle,
 			plan.summary,
@@ -758,7 +775,7 @@ async function runAutonomousMission(
 			currentMilestoneId: null,
 		});
 		const finalValidationSharedState = await buildMissionPromptSharedState(missionState, "validator", null);
-		writeCmuxRoleMarker(state.activeMission?.cmuxStreaming, "validator", "Final mission validation");
+		writeCmuxRoleMarker(state.activeMission?.cmuxStreaming, "validator", "Final goal validation");
 		const finalValidationExecution = await spawnOrchSubagent({
 			role: "validator",
 			prompt: buildFinalValidationPrompt(goal, plan, featureRuns, milestoneRuns, finalValidationSharedState),
@@ -775,7 +792,7 @@ async function runAutonomousMission(
 		);
 		await appendMissionKnowledgeBase(
 			missionState,
-			"Final mission validation",
+			"Final goal validation",
 			buildMilestoneKnowledgeBaseLines(finalValidation),
 		);
 		if (!finalValidation.passed) {
@@ -976,8 +993,8 @@ function buildMilestoneValidationPrompt(
 
 	return [
 		"Validate a completed milestone as a grouped deliverable.",
-		`Mission goal: ${goal}`,
-		`Mission summary: ${plan.summary}`,
+		`Goal: ${goal}`,
+		`Goal summary: ${plan.summary}`,
 		`Milestone: ${milestone.title}`,
 		`Milestone summary: ${milestone.summary}`,
 		`Milestone validation trigger: ${milestone.validationTrigger}`,
@@ -1012,19 +1029,19 @@ function buildFinalValidationPrompt(
 	);
 
 	return [
-		"Perform final validation for the entire mission.",
-		`Mission goal: ${goal}`,
-		`Mission summary: ${plan.summary}`,
+		"Perform final validation for the entire goal.",
+		`Goal: ${goal}`,
+		`Goal summary: ${plan.summary}`,
 		"Completed feature summaries:",
 		...(featureSummaries.length > 0 ? featureSummaries : ["- none"]),
 		"Milestone validation summaries:",
 		...(milestoneSummaries.length > 0 ? milestoneSummaries : ["- none"]),
 		...buildSharedStatePromptSection(sharedState, false),
-		"Mission validation contract:",
+		"Goal validation contract:",
 		...plan.validationContract.criteria.map(
 			(criterion) => `- ${criterion.id}: ${criterion.title} (${criterion.type}) — ${criterion.description}`,
 		),
-		"Inspect the repository and determine whether the overall mission is done. Never modify files.",
+		"Inspect the repository and determine whether the overall goal is done. Never modify files.",
 		"Return strict JSON only with this shape:",
 		'{ "passed": true, "summary": "string", "issues": [{ "severity": "critical|major|minor", "title": "string", "details": "string", "action": "string" }], "evidence": ["string"] }',
 	].join("\n");
@@ -1236,12 +1253,12 @@ function buildMissionCompletionText(result: MissionRunResult): string {
 
 	return [
 		`Status: ${record.status}`,
-		`Mission: ${record.plan.missionTitle}`,
+		`Goal: ${record.plan.missionTitle}`,
 		`Features completed: ${completedFeatures}/${totalFeatures}`,
 		`Milestones validated: ${record.milestoneRuns.filter((run) => run.status === "passed").length}/${record.plan.milestones.length}`,
 		`Final validation: ${finalSummary}`,
-		`Mission state dir: ${record.stateDir}`,
-		`Saved mission log: ${result.filePath}`,
+		`Goal state dir: ${record.stateDir}`,
+		`Saved goal log: ${result.filePath}`,
 	].join("\n");
 }
 
@@ -1257,7 +1274,7 @@ function deliverPendingTakeover(pi: ExtensionAPI, pendingTakeover: OrchPendingTa
 			text:
 				pendingTakeover.text.length > 0
 					? pendingTakeover.text
-					: "The previous autonomous mission was interrupted. Continue interactively with these attachments.",
+					: "The previous autonomous goal was interrupted. Continue interactively with these attachments.",
 		},
 		...pendingTakeover.images,
 	];
@@ -1344,7 +1361,7 @@ function renderMissionProgressLines(theme: OrchTheme, mission: OrchActiveMission
 	const liveState = mission.liveState;
 	const currentMilestone = getCurrentMilestone(mission);
 
-	lines.push(formatMissionLine(theme, width, GLYPHS.boxTopLeft, ` Mission: ${truncateInlineText(mission.goal, 120)}`));
+	lines.push(formatMissionLine(theme, width, GLYPHS.boxTopLeft, ` Goal: ${truncateInlineText(mission.goal, 120)}`));
 	lines.push(formatMissionLine(theme, width, GLYPHS.boxVert, ` Task: ${describeCurrentMissionTask(mission)}`));
 
 	if (currentMilestone) {
@@ -1494,7 +1511,7 @@ function describeCurrentMissionTask(mission: OrchActiveMission): string {
 	}
 
 	if (liveState.phase === "running final validation") {
-		return "Validator running final mission validation";
+		return "Validator running final goal validation";
 	}
 	if (liveState.phase.startsWith("validating milestone ")) {
 		return liveState.phase.replace("validating milestone ", "Validator reviewing milestone ");
@@ -1548,7 +1565,7 @@ async function resolveMissionGoal(args: string, ctx: ExtensionCommandContext): P
 	if (!ctx.hasUI) {
 		return undefined;
 	}
-	return ctx.ui.input("Mission goal", "Describe what Orch should build or change");
+	return ctx.ui.input("Goal", "Describe what Orch should build or change");
 }
 
 function reportMissionEvent(
@@ -1602,6 +1619,7 @@ function setMissionStatus(ctx: ExtensionCommandContext, state: OrchRuntimeState,
 	if (state.activeMission && text) {
 		state.activeMission.phase = text;
 	}
+	syncCmuxMissionStatus(state, text);
 	if (!ctx.hasUI) return;
 	const statusText = text ? `${text} • /orch takeover to interrupt` : undefined;
 	ctx.ui.setStatus(MISSION_STATUS_KEY, statusText ? ctx.ui.theme.fg("accent", statusText) : undefined);

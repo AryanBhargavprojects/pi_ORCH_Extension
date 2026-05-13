@@ -8,9 +8,9 @@ It adds:
 - a Claude Code-like `TodoWrite` checklist for the main Pi orchestrator
 - Orch sub-agents via `orch_delegate` (validator runs are always fresh; other roles may reuse cached context)
 - orchestrator-only advisor guidance via `orch_smart_friend`
-- autonomous mission mode via `/mission`
+- autonomous goal mode via `/orch goal`
 - an Orch control surface via `/orch` and `/orch-model`
-- custom footer, mission widgets, and compact tool rendering
+- custom footer, goal widgets, and compact tool rendering
 
 ## Install
 
@@ -67,8 +67,8 @@ That lets you iterate in-place and reload with `/reload`.
 - `config.ts` - Orch config schema, defaults, validation, load/save helpers
 - `cmux-streaming.ts` - caller-anchored cmux worker/validator split-pane setup and raw role stream tailing
 - `interactive.ts` - default interactive orchestrator behavior plus `TodoWrite`, `orch_delegate`, and `orch_smart_friend`
-- `mission.ts` - autonomous `/mission` loop, deterministic planning/steering, milestones, conditional validation, and the live mission block UI
-- `mission-state.ts` - live mission state directory I/O, state snapshots, feature status tracking
+- `mission.ts` - autonomous `/orch goal` engine, deterministic planning/steering, milestones, conditional validation, and the live goal block UI
+- `mission-state.ts` - live goal state directory I/O, state snapshots, feature status tracking
 - `mission-types.ts` - shared mission, milestone, fix-task, and state types
 - `plan.ts` - Plan Mode workflow, `/plan` command, Ctrl+\` shortcut, plan progress UI
 - `plan-state.ts` - Plan Mode state directory I/O and artifact persistence
@@ -81,7 +81,7 @@ That lets you iterate in-place and reload with `/reload`.
 - `prompts/validator.md` - validator system prompt
 - `prompts/smart-friend.md` - smart friend advisor system prompt
 - `role-runner.ts` - Orch subagent spawner plus worker/validator wrappers and non-validator session reuse
-- `runtime.ts` - runtime state plus footer/mission status helpers
+- `runtime.ts` - runtime state plus footer/goal status helpers
 - `constants.ts` - shared metadata and command names
 - `utils.ts` - shared helpers for slug generation and error formatting
 - `package.json` - Pi package metadata for npm/git distribution
@@ -91,15 +91,15 @@ That lets you iterate in-place and reload with `/reload`.
 Primary entrypoints:
 
 - `/orch` - Orch control center
-- `/orch status` - runtime and config summary, including live mission state from `state.json` when a mission is active
+- `/orch status` - runtime and config summary, including live goal state from `state.json` when a goal is active
 - `/orch config` - show merged config plus user/project overrides
 - `/orch config paths` - show config file paths and resolved Orch storage paths
 - `/orch config init user|project [force]` - write a scaffold config file
 - `/orch config set user|project <key> <value>` - persist a specific setting
-- `/orch takeover [prompt]` - interrupt an active mission and return to interactive control
+- `/orch takeover [prompt]` - interrupt an active goal and return to interactive control
 - `/orch reload` - reload Pi so Orch changes are picked up immediately
 - `/orch-model [user|project] [role] [provider/model]` - select a Pi-available model for Orch sub-agents
-- `/mission <goal>` - start explicit autonomous mission mode
+- `/orch goal <goal>` - start explicit autonomous goal mode
 - `/plan <goal>` - start Plan Mode (read-only analysis, no project edits)
 - `/plan status` - report active plan status
 - `/plan cancel` - abort active plan
@@ -151,10 +151,26 @@ Additional custom tools:
   - `plan_codebase`
   - `plan_researcher`
 - `orch_smart_friend` - ask a read-only advisor for a second opinion when the orchestrator is stuck
+- `tinyfish` - run the TinyFish web automation/search agent for current web search, source lookup, live website extraction, and scraping
 
-This gives the main conversational agent a way to orchestrate directly, keep visible progress with todos, delegate focused sub-tasks using the role-specific models from Orch config, and consult a stronger read-only advisor when needed.
+cmux integration:
 
-Validation is conditional during normal orchestration unless a stricter mission-stage validation step is triggered.
+- When Pi runs inside cmux, Orch mirrors task/goal/plan/todo progress to the cmux workspace sidebar using `cmux set-status`, `cmux set-progress`, and `cmux log`.
+- Orch sends native cmux notifications with `cmux notify` when interactive turns, goals, plans, or tracked todo lists complete.
+- cmux calls are best-effort no-ops outside cmux and never block Orch work.
+
+This gives the main conversational agent a way to orchestrate directly, keep visible progress with todos, delegate focused sub-tasks using the role-specific models from Orch config, consult a stronger read-only advisor when needed, use cmux workspace status/notifications, and use TinyFish for web search/website automation.
+
+Validation is conditional during normal orchestration unless a stricter goal-stage validation step is triggered.
+
+### TinyFish web search agent
+
+Orch registers a `tinyfish` custom tool for the main orchestrator and enables it for `plan_researcher` sub-agents. Use it with either:
+
+- `query` for broad web search (defaults to DuckDuckGo HTML search results)
+- `url` + `goal` for a specific website extraction/automation task
+
+TinyFish authentication is read from `TINYFISH_API_KEY`; if that is not set, Orch falls back to `~/.pi/agent/orch/tinyfish-api-key`. Keep this file outside git and mode `0600`.
 
 ## Sub-agent model configuration
 
@@ -180,7 +196,7 @@ Behavior:
   - project scope
   - user scope
 - persists the selected provider/model pair into Orch config
-- the selected worker/validator/smart-friend/plan role models are used by Orch sub-agents during delegation, `/mission`, and `/plan` runs
+- the selected worker/validator/smart-friend/plan role models are used by Orch sub-agents during delegation, `/orch goal`, and `/plan` runs
 
 Interactive flow:
 
@@ -211,64 +227,64 @@ Implemented pieces:
 
 - **Subagent spawner** - `spawnOrchSubagent()` in `role-runner.ts`
 - **Worker sub-agent wrapper** - `runOrchWorkerSubagent()`
-  - receives a feature spec plus mission shared-state context
+  - receives a feature spec plus goal shared-state context
   - implements the feature and any generated fix tasks
   - returns a structured handoff for the main Pi orchestrator and validator consumption
 - **Validator sub-agent wrapper** - `runOrchValidatorSubagent()`
-  - receives the worker handoff plus mission shared-state context
+  - receives the worker handoff plus goal shared-state context
   - reviews the repository state
   - flags issues with severity and action items
-- **Shared mission state access**
-  - every role receives the mission state directory + file paths in its task prompt
+- **Shared goal state access**
+  - every role receives the goal state directory + file paths in its task prompt
   - roles can read the shared state files directly during execution
   - workers receive guidelines + knowledge base + feature status summary
   - validators receive knowledge base + feature status summary
   - failed validation is converted into deterministic fix tasks without spawning an orchestrator sub-agent
 
-## Autonomous mission mode
+## Autonomous goal mode
 
-`/mission <goal>` runs an isolated Orch loop:
+`/orch goal <goal>` runs an isolated Orch loop:
 
-1. The main Pi agent orchestrates the mission
-2. Orch creates a simple mission plan from the goal
-3. Orch creates a live mission state directory under `paths.missionsDir/<mission-id>/`
+1. The main Pi agent orchestrates the goal
+2. Orch creates a simple goal execution plan from the goal
+3. Orch creates a live goal state directory under `paths.missionsDir/<goal-id>/`
 4. Worker sub-agent executes each feature, usually reusing its cached role session context when the configuration matches
 5. Validator sub-agent reviews a feature only when conditional policy says validation is needed; validator runs are always fresh
 6. If validation fails, Orch generates deterministic fix tasks and optional follow-up instructions
 7. Worker executes the fix tasks on the next attempt
 8. After each milestone, validator performs milestone-level validation
-9. Validator performs final mission validation
-10. Final mission record is written to `paths.missionsDir`
+9. Validator performs final goal validation
+10. Final goal record is written to `paths.missionsDir`
 
 Phase 4 behavior now implemented:
 
-- **Live mission block UI**
-  - the main Pi pane shows a single mission-control block above the editor during active missions
+- **Live goal block UI**
+  - the main Pi pane shows a single goal-control block above the editor during active goals
   - the block is styled as a distinct dark status panel instead of footer-like text
-  - it combines the mission goal, current task, live checklist from `features.json`, and the latest orchestrator update
+  - it combines the goal objective, current task, live checklist from `features.json`, and the latest orchestrator update
   - orchestrator visibility stays in the main Pi pane instead of a separate cmux pane
   - planned features and generated fix tasks both appear in the checklist
-  - routine mission progress chatter is suppressed from the main transcript so the mission block becomes the primary UI
-  - the block clears automatically when the mission completes or is interrupted
+  - routine goal progress chatter is suppressed from the main transcript so the goal block becomes the primary UI
+  - the block clears automatically when the goal completes or is interrupted
 - **Interrupt and take-over**
   - use `/orch takeover` or `/orch-takeover`
-  - or simply type a normal prompt while a mission is running
-  - Orch aborts the active mission and hands control back safely
-  - if you typed a prompt during mission execution, Orch delivers it after the mission has stopped
+  - or simply type a normal prompt while a goal is running
+  - Orch aborts the active goal and hands control back safely
+  - if you typed a prompt during goal execution, Orch delivers it after the goal has stopped
 - **cmux split-pane streaming**
-  - when Orch is running inside cmux, a mission creates persistent role panes for:
+  - when Orch is running inside cmux, a goal creates persistent role panes for:
     - `worker`
     - `validator`
-  - the orchestrator stays in the main Pi mission block on the left
+  - the orchestrator stays in the main Pi goal block on the left
   - pane creation is anchored to the current caller pane/workspace only, so Orch splits the active workspace instead of creating or drifting into a separate workspace view
   - if cmux cannot resolve the caller pane/workspace reliably, Orch skips split-pane streaming instead of guessing
-  - panes are created once per mission, not once per feature
-  - worker runs stream sequentially into the same worker pane across the mission
-  - validator runs stream sequentially into the same validator pane across the mission
-  - raw thinking/text deltas are appended to role-specific mission logs and tailed live in the cmux panes
+  - panes are created once per goal, not once per feature
+  - worker runs stream sequentially into the same worker pane across the goal
+  - validator runs stream sequentially into the same validator pane across the goal
+  - raw thinking/text deltas are appended to role-specific goal logs and tailed live in the cmux panes
   - pane management is cmux-only for v1 and uses cmux's programmable API
-- **Externalized mission state**
-  - every mission now creates a live state directory:
+- **Externalized goal state**
+  - every goal now creates a live state directory:
     - `plan.json`
     - `features.json`
     - `validation-contract.md`
@@ -276,14 +292,14 @@ Phase 4 behavior now implemented:
     - `guidelines.md`
     - `state.json`
   - `features.json` tracks feature status with `pending`, `in-progress`, `done`, and `failed`
-  - generated fix tasks are externalized into the feature state as mission-visible fix entries
+  - generated fix tasks are externalized into the feature state as goal-visible fix entries
   - `knowledge-base.md` accumulates validator findings and deterministic fix-plan notes
   - `guidelines.md` stores planning-time guidance plus steering-time updates
-  - `state.json` is updated at phase transitions and powers live `/orch status` mission progress
+  - `state.json` is updated at phase transitions and powers live `/orch status` goal progress
 - **Milestones and milestone validation**
-  - mission plans now include milestone groups
+  - goal plans now include milestone groups
   - Orch validates each milestone as an integrated unit before proceeding
-  - milestone results are persisted in the final mission record
+  - milestone results are persisted in the final goal record
 - **Fix-task loop**
   - validator failures now flow through an explicit loop:
     - validator flags issues
@@ -293,7 +309,7 @@ Phase 4 behavior now implemented:
   - the built-in footer is replaced by a single-line custom Orch footer
   - it shows only model name, current thinking level, current context usage, and an animated mascot
   - thinking-level display mirrors Pi's model-capability behavior exactly
-  - the mascot reacts to normal chat work and Orch mission phases
+  - the mascot reacts to normal chat work and Orch goal phases
 - **Compact tool activity rendering**
   - built-in `read`, `bash`, `edit`, `write`, `find`, `grep`, and `ls` tool output is rendered in a subtler two-line activity style
   - collapsed tool rows show concise summaries instead of dumping raw output by default
@@ -328,9 +344,9 @@ Shortcuts:
 - `/plan status` shows active plan phase and state directory
 - `/plan cancel` aborts an active plan
 
-If an agent turn or mission is already running, the shortcut notifies instead of starting a second plan.
+If an agent turn or goal is already running, the shortcut notifies instead of starting a second plan.
 
-After completion, Orch suggests running `/mission <refined goal>` to execute the plan autonomously.
+After completion, Orch suggests running `/orch goal <refined goal>` to execute the plan autonomously.
 
 Plan Mode role models are configurable through `/orch-model` using `plan_clarifier`, `plan_codebase`, `plan_researcher`, `plan_feasibility`, and `plan_synthesizer`. If a plan role is not explicitly configured, it inherits the current merged `orchestrator` model so existing project configs keep working.
 
@@ -417,5 +433,5 @@ The interactive orchestrator prompt and Orch sub-agent session behavior load fro
 
 - No build step is required for now; Pi loads the TypeScript directly via its extension loader.
 - Validator sessions are created with the Pi SDK in fresh in-memory sessions; other Orch roles may reuse cached in-memory sub-agent sessions until Orch shuts down.
-- Mission runs write a JSON mission record under the configured `missionsDir`.
-- While a mission is running, Orch also maintains a human-readable/live mission state directory under `paths.missionsDir/<mission-id>/`.
+- Goal runs write a JSON goal record under the configured `missionsDir`.
+- While a goal is running, Orch also maintains a human-readable/live goal state directory under `paths.missionsDir/<goal-id>/`.

@@ -5,6 +5,7 @@ import { type Component, truncateToWidth, type TUI, visibleWidth } from "@marioz
 
 import { loadOrchConfig, type OrchLoadedConfig } from "./config.js";
 import { GLYPHS, ORCH_COMMANDS, ORCH_WIDGET_IDS } from "./constants.js";
+import { completeCmuxPlan, syncCmuxPlanStatus } from "./cmux-integration.js";
 import { formatElapsed, SPINNER_FRAME_MS } from "./loading.js";
 import { emitOrchEvent, type OrchEventLevel } from "./messages.js";
 import type { PlanClarificationQuestion, PlanClarificationResult, PlanPhase, PlanResult } from "./plan-types.js";
@@ -18,7 +19,7 @@ import {
 } from "./plan-state.js";
 import { spawnOrchSubagent, type OrchSubagentStreamEvent } from "./role-runner.js";
 import { setOrchStatus, type OrchActivePlan, type OrchRuntimeState } from "./runtime.js";
-import { formatErrorMessage } from "./utils.js";
+import { formatErrorMessage, isAbortLikeError } from "./utils.js";
 
 const PLAN_STATUS_KEY = "orch-plan";
 const PLAN_RESEARCH_TOOLS = ["read", "bash", "grep", "find", "ls"];
@@ -62,7 +63,7 @@ export function registerPlanCommand(pi: ExtensionAPI, state: OrchRuntimeState): 
 			}
 
 			if (state.activeMission) {
-				reportPlanEvent(pi, ctx, "Mission running", "An autonomous mission is already running. Cancel it before starting a plan.", "warning");
+				reportPlanEvent(pi, ctx, "Goal running", "An autonomous goal is already running. Cancel it before starting a plan.", "warning");
 				return;
 			}
 
@@ -81,9 +82,14 @@ export function registerPlanCommand(pi: ExtensionAPI, state: OrchRuntimeState): 
 			if (!ctx.hasUI) {
 				try {
 					const result = await runPlanWorkflow(pi, ctx, goal, state.configState, state);
-					reportPlanEvent(pi, ctx, "Plan complete", buildPlanCompletionText(result), "success");
+					const completionText = buildPlanCompletionText(result);
+					reportPlanEvent(pi, ctx, "Plan complete", completionText, "success");
+					completeCmuxPlan("completed", goal, completionText);
 				} catch (error) {
-					reportPlanEvent(pi, ctx, "Plan failed", formatErrorMessage(error), "error");
+					const message = formatErrorMessage(error);
+					const cancelled = isAbortLikeError(error);
+					reportPlanEvent(pi, ctx, cancelled ? "Plan cancelled" : "Plan failed", message, cancelled ? "warning" : "error");
+					completeCmuxPlan(cancelled ? "cancelled" : "failed", goal, message);
 				} finally {
 					setPlanStatus(ctx, state, undefined);
 					clearPlanWidgets(ctx);
@@ -104,7 +110,7 @@ export function registerPlanCommand(pi: ExtensionAPI, state: OrchRuntimeState): 
 				return;
 			}
 			if (state.activePlan || state.activeMission || !ctx.isIdle()) {
-				ctx.ui.notify("An agent turn, mission, or plan is already active. Finish or cancel it first.", "warning");
+				ctx.ui.notify("An agent turn, goal, or plan is already active. Finish or cancel it first.", "warning");
 				return;
 			}
 
@@ -223,12 +229,18 @@ function startPlanInBackground(
 	activePlan.backgroundPromise = (async () => {
 		try {
 			const result = await runPlanWorkflow(pi, ctx, goal, configState, state);
-			reportPlanEvent(pi, ctx, "Plan complete", buildPlanCompletionText(result), "success");
+			const completionText = buildPlanCompletionText(result);
+			reportPlanEvent(pi, ctx, "Plan complete", completionText, "success");
+			completeCmuxPlan("completed", goal, completionText);
 		} catch (error) {
 			if (activePlan.abortController.signal.aborted) {
-				reportPlanEvent(pi, ctx, "Plan cancelled", "Plan Mode was cancelled.", "warning");
+				const message = "Plan Mode was cancelled.";
+				reportPlanEvent(pi, ctx, "Plan cancelled", message, "warning");
+				completeCmuxPlan("cancelled", goal, message);
 			} else {
-				reportPlanEvent(pi, ctx, "Plan failed", formatErrorMessage(error), "error");
+				const message = formatErrorMessage(error);
+				reportPlanEvent(pi, ctx, "Plan failed", message, "error");
+				completeCmuxPlan("failed", goal, message);
 			}
 		} finally {
 			if (state.activePlan === activePlan) {
@@ -362,7 +374,7 @@ async function runPlanWorkflow(
 			refinedGoal,
 			feasibility: extractSummary(feasibility),
 			planPath: paths.planDir,
-			suggestedNextStep: `/mission ${shortGoal}`,
+			suggestedNextStep: `/orch goal ${shortGoal}`,
 		};
 	} catch (error) {
 		const terminalPhase: PlanPhase = signal?.aborted ? "cancelled" : "failed";
@@ -936,6 +948,7 @@ function setPlanPhase(ctx: PlanContext, state: OrchRuntimeState, phase: PlanPhas
 }
 
 function setPlanStatus(ctx: PlanContext, state: OrchRuntimeState, text: string | undefined): void {
+	syncCmuxPlanStatus(state, text);
 	if (!ctx.hasUI) return;
 	const statusText = text ? `plan: ${text} • /plan cancel` : undefined;
 	ctx.ui.setStatus(PLAN_STATUS_KEY, statusText ? ctx.ui.theme.fg("accent", statusText) : undefined);
@@ -943,8 +956,10 @@ function setPlanStatus(ctx: PlanContext, state: OrchRuntimeState, text: string |
 }
 
 function updatePlanProgressWidget(ctx: PlanContext, state: OrchRuntimeState): void {
-	if (!ctx.hasUI || !state.activePlan) return;
+	if (!state.activePlan) return;
 
+	syncCmuxPlanStatus(state, state.activePlan.phase);
+	if (!ctx.hasUI) return;
 	ctx.ui.setWidget(
 		ORCH_WIDGET_IDS.planProgress,
 		(tui, theme) => new OrchPlanProgressComponent(tui, theme, state.activePlan!),

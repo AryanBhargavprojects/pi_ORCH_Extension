@@ -6,7 +6,7 @@ import { registerOrchCommands } from "./commands.js";
 import { registerOrchFooter } from "./footer.js";
 import { registerImagePasteAttachments } from "./image-paste.js";
 import { registerInteractiveOrch } from "./interactive.js";
-import { registerMissionCommand } from "./mission.js";
+import { registerGoalCommand } from "./mission.js";
 import { registerPlanCommand } from "./plan.js";
 import { registerOrchMessageRenderer } from "./messages.js";
 import { registerOrchModelCommand } from "./model-command.js";
@@ -15,10 +15,14 @@ import { registerOrchLoadingIndicator } from "./loading.js";
 import { registerCompactToolRenderers } from "./tool-renderers.js";
 import { disposeOrchSubagentSessions } from "./role-runner.js";
 import { clearTodoUi, registerTodoWriteTool } from "./todos.js";
+import { registerTinyFishTool } from "./tinyfish.js";
+import { registerCmuxIntegration } from "./cmux-integration.js";
 
 export default function orchExtension(pi: ExtensionAPI): void {
 	const runtimeState = createRuntimeState();
 
+	registerTinyFishTool(pi);
+	registerCmuxIntegration(pi, runtimeState);
 	registerOrchMessageRenderer(pi);
 	registerOrchLoadingIndicator(pi);
 	registerCompactToolRenderers(pi);
@@ -27,7 +31,7 @@ export default function orchExtension(pi: ExtensionAPI): void {
 	registerOrchFooter(pi, runtimeState);
 	registerOrchModelCommand(pi, runtimeState);
 	registerImagePasteAttachments(pi);
-	registerMissionCommand(pi, runtimeState);
+	registerGoalCommand(pi, runtimeState);
 	registerPlanCommand(pi, runtimeState);
 	registerInteractiveOrch(pi, runtimeState);
 

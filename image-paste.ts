@@ -1,10 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { ImageContent } from "@mariozechner/pi-ai";
-import { CustomEditor, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import type { EditorTheme, KeybindingsManager, TUI } from "@mariozechner/pi-tui";
+import { CustomEditor, type ExtensionAPI, type KeybindingsManager } from "@mariozechner/pi-coding-agent";
+import type { EditorTheme, TUI } from "@mariozechner/pi-tui";
 
 const IMAGE_MARKER_PREFIX = "Image";
-const PASTED_IMAGE_PATH_PATTERN = /(?:file:\/\/)?\/(?:[^\s'"`]+\/)*pi-clipboard-[a-f0-9-]+\.(?:png|jpg|jpeg|gif|webp)/gi;
+const CLIPBOARD_IMAGE_FILE_PATTERN = String.raw`(?:pi-)?clipboard-[A-Za-z0-9-]+\.(?:png|jpg|jpeg|gif|webp)`;
+const PASTED_IMAGE_PATH_PATTERN = new RegExp(String.raw`(?:file:\/\/)?\/(?:[^\s'"\`]+\/)*${CLIPBOARD_IMAGE_FILE_PATTERN}`, "gi");
 
 const MIME_TYPES_BY_EXTENSION: Record<string, string> = {
 	png: "image/png",
@@ -36,7 +37,7 @@ export function registerImagePasteAttachments(pi: ExtensionAPI): void {
 			return;
 		}
 
-		resetImagePasteState(state);
+		resetImagePasteState(state, { resetCounter: true });
 		ctx.ui.setEditorComponent((tui, theme, keybindings) => new OrchImageAttachmentEditor(tui, theme, keybindings, state));
 	});
 
@@ -60,7 +61,7 @@ export function registerImagePasteAttachments(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
-		resetImagePasteState(state);
+		resetImagePasteState(state, { resetCounter: true });
 		if (ctx.hasUI) {
 			ctx.ui.setEditorComponent(undefined);
 		}
@@ -115,14 +116,13 @@ function collectImageAttachmentsForInput(
 	}
 
 	const fallbackPaths = findPastedImagePaths(text);
-	let fallbackMarkerIndex = attachments.length + 1;
 	for (const imagePath of fallbackPaths) {
 		const pastedImage = normalizePastedImagePath(imagePath);
 		if (!pastedImage) {
 			continue;
 		}
 
-		const marker = createImageMarker(fallbackMarkerIndex++);
+		const marker = createImageMarker(state.nextIndex++);
 		const attachment = readImageAttachment({ marker, path: pastedImage.path, mimeType: pastedImage.mimeType });
 		if (!attachment) {
 			continue;
@@ -171,7 +171,9 @@ function createImageMarker(index: number): string {
 	return `[${IMAGE_MARKER_PREFIX} #${index}]`;
 }
 
-function resetImagePasteState(state: ImagePasteState): void {
+function resetImagePasteState(state: ImagePasteState, options: { resetCounter?: boolean } = {}): void {
 	state.pending = [];
-	state.nextIndex = 1;
+	if (options.resetCounter) {
+		state.nextIndex = 1;
+	}
 }

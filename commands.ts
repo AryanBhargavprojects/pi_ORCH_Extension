@@ -16,7 +16,7 @@ import {
 } from "./config.js";
 import { ORCH_COMMANDS, ORCH_EXTENSION_NAME } from "./constants.js";
 import { readMissionLiveStateFromFile } from "./mission-state.js";
-import { requestMissionTakeover } from "./mission.js";
+import { requestMissionTakeover, runOrchGoalCommand } from "./mission.js";
 import { formatRuntimeSummary, setOrchStatus, type OrchRuntimeState } from "./runtime.js";
 import { formatErrorMessage } from "./utils.js";
 
@@ -27,11 +27,11 @@ type CompletionItem = {
 
 export function registerOrchCommands(pi: ExtensionAPI, state: OrchRuntimeState): void {
 	pi.registerCommand(ORCH_COMMANDS.main, {
-		description: "Orch control center: status, config, mission, model, takeover, reload",
+		description: "Orch control center: goal, status, config, model, takeover, reload",
 		getArgumentCompletions: (prefix) => getOrchArgumentCompletions(prefix),
 		handler: async (args, ctx) => {
 			try {
-				await handleOrchCommand(args, ctx, state);
+				await handleOrchCommand(pi, args, ctx, state);
 			} catch (error) {
 				showOutput(ctx, formatErrorMessage(error), "error");
 			}
@@ -42,7 +42,7 @@ export function registerOrchCommands(pi: ExtensionAPI, state: OrchRuntimeState):
 		description: "Alias for /orch status",
 		handler: async (_args, ctx) => {
 			try {
-				await handleOrchCommand("status", ctx, state);
+				await handleOrchCommand(pi, "status", ctx, state);
 			} catch (error) {
 				showOutput(ctx, formatErrorMessage(error), "error");
 			}
@@ -53,7 +53,7 @@ export function registerOrchCommands(pi: ExtensionAPI, state: OrchRuntimeState):
 		description: "Alias for /orch reload",
 		handler: async (_args, ctx) => {
 			try {
-				await handleOrchCommand("reload", ctx, state);
+				await handleOrchCommand(pi, "reload", ctx, state);
 			} catch (error) {
 				showOutput(ctx, formatErrorMessage(error), "error");
 			}
@@ -64,7 +64,7 @@ export function registerOrchCommands(pi: ExtensionAPI, state: OrchRuntimeState):
 		description: "Alias for /orch takeover",
 		handler: async (args, ctx) => {
 			try {
-				await handleOrchCommand(`takeover ${args}`.trim(), ctx, state);
+				await handleOrchCommand(pi, `takeover ${args}`.trim(), ctx, state);
 			} catch (error) {
 				showOutput(ctx, formatErrorMessage(error), "error");
 			}
@@ -72,13 +72,21 @@ export function registerOrchCommands(pi: ExtensionAPI, state: OrchRuntimeState):
 	});
 }
 
-async function handleOrchCommand(args: string, ctx: ExtensionCommandContext, state: OrchRuntimeState): Promise<void> {
+async function handleOrchCommand(
+	pi: ExtensionAPI,
+	args: string,
+	ctx: ExtensionCommandContext,
+	state: OrchRuntimeState,
+): Promise<void> {
 	const { rest, token } = consumeToken(args);
 
 	switch (token) {
 		case undefined:
 			await refreshConfigState(ctx, state);
 			showOutput(ctx, `${await buildRuntimeStatusText(state, ctx.cwd)}\n\n${buildOrchHelpText()}`);
+			return;
+		case "goal":
+			await runOrchGoalCommand(pi, rest, ctx, state);
 			return;
 		case "status":
 			await refreshConfigState(ctx, state);
@@ -97,14 +105,14 @@ async function handleOrchCommand(args: string, ctx: ExtensionCommandContext, sta
 				pendingTakeover.length > 0 ? { text: pendingTakeover, images: [] } : undefined,
 			);
 			if (!interrupted) {
-				showOutput(ctx, "There is no running Orch mission to interrupt.", "warning");
+				showOutput(ctx, "There is no running Orch goal to interrupt.", "warning");
 				return;
 			}
 			showOutput(
 				ctx,
 				pendingTakeover.length > 0
-					? "Interrupting the active Orch mission. Your takeover prompt will run once the mission stops."
-					: "Interrupting the active Orch mission. You can continue interactively once it stops.",
+					? "Interrupting the active Orch goal. Your takeover prompt will run once the goal stops."
+					: "Interrupting the active Orch goal. You can continue interactively once it stops.",
 				"warning",
 			);
 			return;
@@ -262,6 +270,7 @@ function buildOrchHelpText(): string {
 	return [
 		"Usage:",
 		`  /${ORCH_COMMANDS.main}`,
+		`  /${ORCH_COMMANDS.main} ${ORCH_COMMANDS.goal} <goal>`,
 		`  /${ORCH_COMMANDS.main} status`,
 		`  /${ORCH_COMMANDS.main} config`,
 		`  /${ORCH_COMMANDS.main} config paths`,
@@ -270,7 +279,6 @@ function buildOrchHelpText(): string {
 		`  /${ORCH_COMMANDS.main} takeover [prompt]`,
 		`  /${ORCH_COMMANDS.main} reload`,
 		`  /${ORCH_COMMANDS.model} [user|project] [role] [provider/model]`,
-		`  /${ORCH_COMMANDS.mission} <goal>`,
 		`  /${ORCH_COMMANDS.plan} <goal>`,
 		`  /${ORCH_COMMANDS.plan} status`,
 		`  /${ORCH_COMMANDS.plan} cancel`,
@@ -384,11 +392,11 @@ function consumeToken(input: string): { rest: string; token?: string } {
 function getOrchArgumentCompletions(prefix: string): CompletionItem[] | null {
 	const tokens = toCompletionTokens(prefix);
 	if (tokens.length === 0) {
-		return toCompletionItems(["status", "config", "takeover", "reload"], "");
+		return toCompletionItems(["goal", "status", "config", "takeover", "reload"], "");
 	}
 
 	if (tokens.length === 1) {
-		return toCompletionItems(["status", "config", "takeover", "reload"], tokens[0]);
+		return toCompletionItems(["goal", "status", "config", "takeover", "reload"], tokens[0]);
 	}
 
 	if (tokens[0] !== "config") {
