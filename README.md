@@ -67,9 +67,7 @@ That lets you iterate in-place and reload with `/reload`.
 - `config.ts` - Orch config schema, defaults, validation, load/save helpers
 - `cmux-streaming.ts` - caller-anchored cmux worker/validator split-pane setup and raw role stream tailing
 - `interactive.ts` - default interactive orchestrator behavior plus `TodoWrite`, `orch_delegate`, and `orch_smart_friend`
-- `mission.ts` - autonomous `/orch goal` engine, deterministic planning/steering, milestones, conditional validation, and the live goal block UI
-- `mission-state.ts` - live goal state directory I/O, state snapshots, feature status tracking
-- `mission-types.ts` - shared mission, milestone, fix-task, and state types
+- Goal engine modules - autonomous `/orch goal` execution, deterministic planning/steering, milestones, conditional validation, live goal block UI, and goal state snapshots
 - `plan.ts` - Plan Mode workflow, `/plan` command, Ctrl+\` shortcut, plan progress UI
 - `plan-state.ts` - Plan Mode state directory I/O and artifact persistence
 - `plan-types.ts` - shared Plan Mode types
@@ -92,6 +90,8 @@ Primary entrypoints:
 
 - `/orch` - Orch control center
 - `/orch status` - runtime and config summary, including live goal state from `state.json` when a goal is active
+- `/orch goal status` - report whether an autonomous goal is running and show its current phase/state paths
+- `/orch goal cancel` - cancel an active autonomous goal without entering takeover mode
 - `/orch config` - show merged config plus user/project overrides
 - `/orch config paths` - show config file paths and resolved Orch storage paths
 - `/orch config init user|project [force]` - write a scaffold config file
@@ -150,6 +150,7 @@ Additional custom tools:
   - `validator`
   - `plan_codebase`
   - `plan_researcher`
+  - `research`
 - `orch_smart_friend` - ask a read-only advisor for a second opinion when the orchestrator is stuck
 - `tinyfish` - run the TinyFish web automation/search agent for current web search, source lookup, live website extraction, and scraping
 
@@ -159,13 +160,13 @@ cmux integration:
 - Orch sends native cmux notifications with `cmux notify` when interactive turns, goals, plans, or tracked todo lists complete.
 - cmux calls are best-effort no-ops outside cmux and never block Orch work.
 
-This gives the main conversational agent a way to orchestrate directly, keep visible progress with todos, delegate focused sub-tasks using the role-specific models from Orch config, consult a stronger read-only advisor when needed, use cmux workspace status/notifications, and use TinyFish for web search/website automation.
+This gives the main conversational agent a way to orchestrate directly, keep visible progress with todos, delegate focused sub-tasks using the role-specific models from Orch config, consult a stronger read-only advisor when needed, use cmux workspace status/notifications, and use TinyFish/Parallel/Context7-enabled research for web and docs lookup.
 
 Validation is conditional during normal orchestration unless a stricter goal-stage validation step is triggered.
 
 ### TinyFish web search agent
 
-Orch registers a `tinyfish` custom tool for the main orchestrator and enables it for `plan_researcher` sub-agents. Use it with either:
+Orch registers a `tinyfish` custom tool for the main orchestrator and enables it for `plan_researcher` and `research` sub-agents. Use it with either:
 
 - `query` for broad web search (defaults to DuckDuckGo HTML search results)
 - `url` + `goal` for a specific website extraction/automation task
@@ -182,11 +183,11 @@ Behavior:
 
 - reads the same Pi model registry used by `/model`
 - only shows models that are currently available/authenticated in Pi
-- lets the user choose which Orch role to configure:
-  - `orchestrator` (main-agent prompt role metadata; not spawned as a sub-agent)
+- lets the user choose which Orch sub-agent role to configure:
   - `worker`
   - `validator`
   - `smart_friend`
+  - `research`
   - `plan_clarifier`
   - `plan_codebase`
   - `plan_researcher`
@@ -196,7 +197,7 @@ Behavior:
   - project scope
   - user scope
 - persists the selected provider/model pair into Orch config
-- the selected worker/validator/smart-friend/plan role models are used by Orch sub-agents during delegation, `/orch goal`, and `/plan` runs
+- the selected worker/validator/smart-friend/research/plan role models are used by Orch sub-agents during delegation, `/orch goal`, and `/plan` runs
 
 Interactive flow:
 
@@ -216,7 +217,7 @@ Examples:
 /orch-model worker
 /orch-model project validator
 /orch-model worker anthropic/claude-sonnet-4-5
-/orch-model user orchestrator openai/gpt-5
+/orch-model user research anthropic/claude-sonnet-4-5
 ```
 
 ## Sub-agent architecture
@@ -247,14 +248,14 @@ Implemented pieces:
 
 1. The main Pi agent orchestrates the goal
 2. Orch creates a simple goal execution plan from the goal
-3. Orch creates a live goal state directory under `paths.missionsDir/<goal-id>/`
+3. Orch creates a live goal state directory under the configured goal runs directory
 4. Worker sub-agent executes each feature, usually reusing its cached role session context when the configuration matches
 5. Validator sub-agent reviews a feature only when conditional policy says validation is needed; validator runs are always fresh
 6. If validation fails, Orch generates deterministic fix tasks and optional follow-up instructions
 7. Worker executes the fix tasks on the next attempt
 8. After each milestone, validator performs milestone-level validation
 9. Validator performs final goal validation
-10. Final goal record is written to `paths.missionsDir`
+10. Final goal record is written to the configured goal runs directory
 
 Phase 4 behavior now implemented:
 
@@ -374,6 +375,7 @@ Project config overrides user config.
     "worker": { "provider": "anthropic", "model": "claude-sonnet-4-5" },
     "validator": { "provider": "anthropic", "model": "claude-sonnet-4-5" },
     "smart_friend": { "provider": "anthropic", "model": "claude-opus-4-7" },
+    "research": { "provider": "anthropic", "model": "claude-sonnet-4-5" },
     "plan_clarifier": { "provider": "anthropic", "model": "claude-opus-4-5" },
     "plan_codebase": { "provider": "anthropic", "model": "claude-sonnet-4-5" },
     "plan_researcher": { "provider": "anthropic", "model": "claude-sonnet-4-5" },
@@ -388,7 +390,6 @@ Project config overrides user config.
     "userProfileFile": "orch/user-profile.json",
     "projectContextFile": ".pi/orch/project-context.json",
     "knowledgeBaseFile": ".pi/orch/knowledge-base.json",
-    "missionsDir": ".pi/orch/missions",
     "adaptationLogFile": ".pi/orch/adaptation-log.jsonl",
     "plansDir": ".pi/orch/plans"
   }
@@ -411,6 +412,7 @@ Files:
 - `prompts/worker.md`
 - `prompts/validator.md`
 - `prompts/smart-friend.md`
+- `prompts/research.md`
 - `prompts/plan_clarifier.md`
 - `prompts/plan_codebase.md`
 - `prompts/plan_researcher.md`
@@ -433,5 +435,5 @@ The interactive orchestrator prompt and Orch sub-agent session behavior load fro
 
 - No build step is required for now; Pi loads the TypeScript directly via its extension loader.
 - Validator sessions are created with the Pi SDK in fresh in-memory sessions; other Orch roles may reuse cached in-memory sub-agent sessions until Orch shuts down.
-- Goal runs write a JSON goal record under the configured `missionsDir`.
-- While a goal is running, Orch also maintains a human-readable/live goal state directory under `paths.missionsDir/<goal-id>/`.
+- Goal runs write a JSON goal record under the configured goal runs directory.
+- While a goal is running, Orch also maintains a human-readable/live goal state directory under that directory.

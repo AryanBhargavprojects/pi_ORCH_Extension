@@ -103,6 +103,7 @@ export function requestMissionTakeover(
 	}
 
 	mission.takeoverRequested = true;
+	mission.cancelRequested = false;
 	if (pendingTakeover) {
 		mission.pendingTakeover = pendingTakeover;
 	}
@@ -112,6 +113,21 @@ export function requestMissionTakeover(
 	}
 
 	return true;
+}
+
+export function cancelActiveMission(state: OrchRuntimeState): string | undefined {
+	const mission = state.activeMission;
+	if (!mission) {
+		return undefined;
+	}
+
+	mission.cancelRequested = true;
+	mission.takeoverRequested = false;
+	mission.pendingTakeover = undefined;
+	if (!mission.abortController.signal.aborted) {
+		mission.abortController.abort();
+	}
+	return mission.goal;
 }
 
 export function registerGoalCommand(pi: ExtensionAPI, state: OrchRuntimeState): void {
@@ -235,6 +251,7 @@ function startMissionInBackground(
 		orchestratorThinking: "",
 		orchestratorText: "",
 		takeoverRequested: false,
+		cancelRequested: false,
 	};
 	state.activeMission = mission;
 	setMissionStatus(ctx, state, mission.phase);
@@ -271,18 +288,20 @@ function startMissionInBackground(
 			if (mission.abortController.signal.aborted) {
 				const message = mission.takeoverRequested
 					? "Autonomous goal interrupted. Returning control to the user."
-					: "Autonomous goal interrupted.";
+					: mission.cancelRequested
+						? "Autonomous goal cancelled."
+						: "Autonomous goal interrupted.";
 				setFooterTransientMood(state, "interrupted", 1800);
 				reportMissionEvent(
 					pi,
 					ctx,
-					"Goal interrupted",
+					mission.cancelRequested ? "Goal cancelled" : "Goal interrupted",
 					message,
 					"warning",
 					"mission",
 				);
 				completeCmuxMission("interrupted", goal, message);
-				emitMissionRecap(pi, ctx, "goal interrupted");
+				emitMissionRecap(pi, ctx, mission.cancelRequested ? "goal cancelled" : "goal interrupted");
 			} else {
 				const message = formatErrorMessage(error);
 				setFooterTransientMood(state, "error", 2200);
@@ -293,7 +312,7 @@ function startMissionInBackground(
 			const pendingTakeover = state.activeMission === mission ? mission.pendingTakeover : undefined;
 			await cleanupCmuxMissionStreaming(
 				mission.cmuxStreaming,
-				mission.takeoverRequested ? "Goal interrupted" : "Goal finished",
+				mission.takeoverRequested ? "Goal interrupted" : mission.cancelRequested ? "Goal cancelled" : "Goal finished",
 			);
 			if (state.activeMission === mission) {
 				state.activeMission = undefined;
@@ -1300,8 +1319,9 @@ function handleSubagentStreamEvent(
 		return;
 	}
 
-	if (event.type === "tool_call") {
-		appendCmuxRoleDelta(mission.cmuxStreaming, event.role, `\n[${event.label}] ${event.detail}\n`);
+	if (event.type === "tool_call" || event.type === "tool_diff") {
+		const diffBlock = event.diff && event.diff.length > 0 ? `\n${event.diff}\n` : "";
+		appendCmuxRoleDelta(mission.cmuxStreaming, event.role, `\n[${event.label}] ${event.detail}${diffBlock}\n`);
 		return;
 	}
 
@@ -1580,7 +1600,7 @@ function reportMissionEvent(
 		if (!shouldDisplayMissionEventInUi(level, phase)) {
 			return;
 		}
-		emitOrchEvent(pi, ctx, body, { title, level, phase });
+		emitOrchEvent(pi, ctx, body, { title, level, phase: phase === "mission" ? "goal" : phase });
 		return;
 	}
 
@@ -1621,7 +1641,7 @@ function setMissionStatus(ctx: ExtensionCommandContext, state: OrchRuntimeState,
 	}
 	syncCmuxMissionStatus(state, text);
 	if (!ctx.hasUI) return;
-	const statusText = text ? `${text} • /orch takeover to interrupt` : undefined;
+	const statusText = text ? `${text} • /orch goal cancel • /orch takeover` : undefined;
 	ctx.ui.setStatus(MISSION_STATUS_KEY, statusText ? ctx.ui.theme.fg("accent", statusText) : undefined);
 	setOrchStatus(ctx, state);
 }

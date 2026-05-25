@@ -5,18 +5,22 @@ import type { Api, AssistantMessage, Model, TextContent } from "@mariozechner/pi
 import {
 	createAgentSession,
 	createBashToolDefinition,
+	createEditToolDefinition,
 	createFindToolDefinition,
 	createGrepToolDefinition,
 	createLsToolDefinition,
 	createReadToolDefinition,
+	createWriteToolDefinition,
 	DefaultResourceLoader,
 	getAgentDir,
 	ModelRegistry,
 	SessionManager,
 	SettingsManager,
+	type ToolDefinition,
 } from "@mariozechner/pi-coding-agent";
 
 import type { OrchLoadedConfig, OrchRoleName } from "./config.js";
+import { computeEditPreviewDiff, computeWritePreviewDiff, formatInlineDiffSummary } from "./diff.js";
 import type {
 	MissionFeature,
 	MissionFixTask,
@@ -28,6 +32,12 @@ import type {
 import { buildSharedStatePromptSection } from "./mission-state.js";
 import { loadOrchRolePrompt } from "./prompt-loader.js";
 import { createTinyFishToolDefinition, TINYFISH_TOOL_NAME } from "./tinyfish.js";
+import {
+	createParallelSearchToolDefinition,
+	createParallelFetchToolDefinition,
+	PARALLEL_SEARCH_TOOL_NAME,
+	PARALLEL_FETCH_TOOL_NAME,
+} from "./parallel-tools.js";
 
 export type OrchSubagentStreamEvent =
 	| {
@@ -42,10 +52,29 @@ export type OrchSubagentStreamEvent =
 	  }
 	| {
 		role: OrchRoleName;
+		type: "tool_diff";
+		label: string;
+		detail: string;
+		diff?: string;
+		diffFilePath?: string;
+	  }
+	| {
+		role: OrchRoleName;
 		type: "tool_call";
 		label: string;
 		detail: string;
+		diff?: string;
+		diffFilePath?: string;
 	  };
+
+export type OrchSubagentToolEvent = {
+	label: string;
+	detail: string;
+	diff?: string;
+	diffFilePath?: string;
+};
+
+export type OrchSubagentOutputSource = "assistant_text" | "streamed_text" | "recovery_text" | "tool_fallback";
 
 export type OrchSubagentRequest = {
 	role: OrchRoleName;
@@ -58,6 +87,9 @@ export type OrchSubagentRequest = {
 	toolNames?: string[];
 	bashCommandGuard?: (command: string) => boolean;
 	bashGuardReason?: string;
+	thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+	/** When true, bypass the per-role session cache and create a fresh session. Required for parallel dispatch. */
+	forceFresh?: boolean;
 };
 
 export type OrchSubagentResult = {
@@ -65,6 +97,9 @@ export type OrchSubagentResult = {
 	provider: string;
 	modelId: string;
 	output: string;
+	outputSource: OrchSubagentOutputSource;
+	emptyFinalText: boolean;
+	toolEvents: OrchSubagentToolEvent[];
 	usage: {
 		input: number;
 		output: number;
@@ -109,12 +144,15 @@ const ORCHESTRATOR_TOOLS = ["read", "bash", "grep", "find", "ls"];
 const WORKER_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const VALIDATOR_TOOLS = ["read", "grep", "find", "ls"];
 const PLAN_CODEBASE_TOOLS = ["read", "grep", "find", "ls"];
-const PLAN_RESEARCHER_TOOLS = ["read", "bash", "grep", "find", "ls", TINYFISH_TOOL_NAME];
+const PLAN_RESEARCHER_TOOLS = ["read", "bash", "grep", "find", "ls", TINYFISH_TOOL_NAME, PARALLEL_SEARCH_TOOL_NAME, PARALLEL_FETCH_TOOL_NAME];
+const RESEARCH_TOOLS = ["read", "bash", "grep", "find", "ls", TINYFISH_TOOL_NAME, PARALLEL_SEARCH_TOOL_NAME, PARALLEL_FETCH_TOOL_NAME];
 const SMART_FRIEND_TOOLS = ["read", "bash", "grep", "find", "ls"];
 const DEFAULT_SUBAGENT_BASH_TIMEOUT_SECONDS = 120;
 const VALIDATOR_STREAMS_DIR_NAME = ".streams";
 const WORKER_SESSION_RESET_POLICY: CachedSessionResetPolicy = { maxRuns: 5, maxTotalTokens: 60000 };
 const NON_WORKER_SESSION_RESET_POLICY: CachedSessionResetPolicy = { maxRuns: 3, maxTotalTokens: 40000 };
+
+type OrchRoleToolDefinition = ToolDefinition<any, any, any>;
 
 type OrchSubagentSession = Awaited<ReturnType<typeof createAgentSession>>["session"];
 type CachedOrchSubagentSession = {
@@ -129,6 +167,8 @@ type CachedSessionResetPolicy = {
 	maxTotalTokens: number;
 };
 
+type ToolExecuteParams<T extends { execute: (...args: never[]) => unknown }> = Parameters<T["execute"]>;
+
 const orchSubagentSessionCache = new Map<string, CachedOrchSubagentSession>();
 
 export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<OrchSubagentResult> {
@@ -138,6 +178,7 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 	const { session, isCached, boundExtensions, cacheKey } = await getOrCreateOrchSubagentSession(request, model);
 
 	const toolArgsById = new Map<string, { toolName: string; args: unknown }>();
+	const toolEvents: OrchSubagentToolEvent[] = [];
 	let streamedText = "";
 	let toolCallCount = 0;
 	const unsubscribe = session.subscribe((event) => {
@@ -150,11 +191,17 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 			toolCallCount++;
 			const started = toolArgsById.get(event.toolCallId);
 			toolArgsById.delete(event.toolCallId);
+			const diffInfo = extractSubagentToolDiff(event.toolName, started?.args, event.result);
+			const toolEvent: OrchSubagentToolEvent = {
+				label: formatSubagentToolLabel(event.toolName),
+				detail: formatSubagentToolDetail(event.toolName, started?.args, event.result, event.isError),
+				...diffInfo,
+			};
+			toolEvents.push(toolEvent);
 			request.onStreamEvent?.({
 				role: request.role,
 				type: "tool_call",
-				label: formatSubagentToolLabel(event.toolName),
-				detail: formatSubagentToolDetail(event.toolName, started?.args, event.result, event.isError),
+				...toolEvent,
 			});
 			return;
 		}
@@ -210,14 +257,37 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 				}
 			}
 		}
-		await session.prompt(request.prompt);
+
+		const runStartMessageCount = session.messages.length;
+		const prompt = appendFinalResponseInstruction(request.prompt);
+		await session.prompt(prompt);
 		if (wasAborted || request.signal?.aborted) {
 			throw new Error(`Orch ${request.role} sub-agent aborted.`);
 		}
-		request.onStreamEvent?.({ role: request.role, type: "status", status: "completed" });
-		const assistantMessage = findLastAssistantMessage(session.messages);
-		const output = findLastAssistantText(session.messages) ?? streamedText.trim();
 
+		let runMessages = session.messages.slice(runStartMessageCount);
+		const assistantOutput = findLastAssistantText(runMessages);
+		const streamedOutput = streamedText.trim();
+		let output = assistantOutput ?? streamedOutput;
+		let outputSource: OrchSubagentOutputSource = assistantOutput ? "assistant_text" : streamedOutput ? "streamed_text" : "tool_fallback";
+		let emptyFinalText = !assistantOutput && !streamedOutput;
+
+		if (output.trim().length === 0 && !wasAborted && !request.signal?.aborted) {
+			const recovery = await recoverMissingFinalText(session, request, toolEvents, () => streamedText);
+			runMessages = session.messages.slice(runStartMessageCount);
+			if (recovery.trim().length > 0) {
+				output = recovery;
+				outputSource = "recovery_text";
+				emptyFinalText = true;
+			} else {
+				output = buildToolFallbackOutput(request.role, toolEvents);
+				outputSource = "tool_fallback";
+				emptyFinalText = true;
+			}
+		}
+
+		request.onStreamEvent?.({ role: request.role, type: "status", status: "completed" });
+		const assistantMessage = findLastAssistantMessage(runMessages);
 		const usage = {
 			input: assistantMessage?.usage?.input ?? 0,
 			output: assistantMessage?.usage?.output ?? 0,
@@ -226,7 +296,10 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 			totalTokens: assistantMessage?.usage?.totalTokens ?? 0,
 			costTotal: assistantMessage?.usage?.cost?.total ?? 0,
 		};
-		if (isCached && cacheKey) {
+
+		if (isCached && cacheKey && emptyFinalText) {
+			await evictCachedOrchSubagentSession(cacheKey, session);
+		} else if (isCached && cacheKey) {
 			updateCachedSessionCounters(cacheKey, session, request.role, usage.totalTokens);
 		}
 
@@ -235,6 +308,9 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 			provider: model.provider,
 			modelId: model.id,
 			output,
+			outputSource,
+			emptyFinalText,
+			toolEvents: [...toolEvents],
 			usage,
 			toolCalls: toolCallCount,
 			elapsedMs: Date.now() - startedAt,
@@ -253,6 +329,67 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 			session.dispose();
 		}
 	}
+}
+
+function appendFinalResponseInstruction(prompt: string): string {
+	return [
+		prompt,
+		"Important final response requirement: after any tool calls finish, always send a non-empty final assistant message. Follow the exact response format requested above (strict JSON, markdown, or plain text as specified). Do not stop after tool calls without a final response.",
+	].join("\n\n");
+}
+
+async function recoverMissingFinalText(
+	session: OrchSubagentSession,
+	request: OrchSubagentRequest,
+	toolEvents: OrchSubagentToolEvent[],
+	getStreamedText: () => string,
+): Promise<string> {
+	const requestedTools = getRequestedTools(request);
+	const recoveryStartMessageCount = session.messages.length;
+	const streamStartLength = getStreamedText().length;
+	const recoveryPrompt = buildMissingFinalTextRecoveryPrompt(request.role, toolEvents);
+
+	session.setActiveToolsByName([]);
+	try {
+		await session.prompt(recoveryPrompt);
+	} finally {
+		session.setActiveToolsByName(requestedTools);
+	}
+
+	const recoveryMessages = session.messages.slice(recoveryStartMessageCount);
+	return findLastAssistantText(recoveryMessages) ?? getStreamedText().slice(streamStartLength).trim();
+}
+
+function buildMissingFinalTextRecoveryPrompt(role: OrchRoleName, toolEvents: OrchSubagentToolEvent[]): string {
+	const isAnalysisRole = role === "plan_codebase" || role === "plan_researcher" || role === "research" || role === "smart_friend" || role === "plan_clarifier" || role === "plan_feasibility" || role === "plan_synthesizer";
+	const urgency = isAnalysisRole
+		? "You must produce the complete final report now. Do not call tools. Just write the report directly in your final message based on the completed tool results you already have."
+		: "Now provide the final report for that previous task based only on the completed tool results and conversation context.";
+	return [
+		`You are the Orch ${role} sub-agent. You completed the previous task turn without sending a final response.`,
+		urgency,
+		"Do not call tools. Follow the exact response format originally requested for the task.",
+		"Observed tool activity:",
+		...formatToolEventsForFallback(toolEvents),
+	].join("\n");
+}
+
+function buildToolFallbackOutput(role: OrchRoleName, toolEvents: OrchSubagentToolEvent[]): string {
+	return [
+		`Orch ${role} produced no final assistant text.`,
+		"",
+		"This is diagnostic fallback output from Orch, not the sub-agent's conclusion.",
+		"",
+		"Tool activity observed:",
+		...formatToolEventsForFallback(toolEvents),
+	].join("\n");
+}
+
+function formatToolEventsForFallback(toolEvents: OrchSubagentToolEvent[]): string[] {
+	if (toolEvents.length === 0) {
+		return ["- none"];
+	}
+	return toolEvents.map((event) => `- ${event.label}: ${event.detail}`);
 }
 
 export async function runOrchWorkerSubagent(request: OrchWorkerSubagentRequest): Promise<OrchSubagentResult> {
@@ -293,7 +430,7 @@ async function getOrCreateOrchSubagentSession(request: OrchSubagentRequest, mode
 	boundExtensions: boolean;
 	cacheKey?: string;
 }> {
-	if (request.role === "validator") {
+	if (request.role === "validator" || request.forceFresh) {
 		return {
 			session: await createFreshOrchSubagentSession(request, model),
 			isCached: false,
@@ -348,11 +485,16 @@ async function createFreshOrchSubagentSession(request: OrchSubagentRequest, mode
 		model,
 		modelRegistry: request.modelRegistry,
 		resourceLoader,
-		tools: getRequestedTools(request) as any,
+		thinkingLevel: request.thinkingLevel,
 		customTools: getRoleToolOverrides(request),
 		sessionManager: SessionManager.inMemory(request.cwd),
 		settingsManager,
 	});
+
+	// Avoid depending on SDK-version-specific `tools` option semantics.
+	// Older Pi SDKs expect built-in Tool objects, while newer SDKs expect tool-name strings.
+	// The AgentSession runtime exposes a stable string-based activator in both versions.
+	session.setActiveToolsByName(getRequestedTools(request));
 
 	return session;
 }
@@ -366,6 +508,7 @@ function getOrchSubagentSessionCacheKey(request: OrchSubagentRequest, model: Mod
 		toolNames: getRequestedTools(request),
 		hasBashCommandGuard: Boolean(request.bashCommandGuard),
 		bashGuardReason: request.bashGuardReason ?? null,
+		thinkingLevel: request.thinkingLevel ?? null,
 	});
 }
 
@@ -440,6 +583,8 @@ function getRoleTools(role: OrchRoleName): string[] {
 			return VALIDATOR_TOOLS;
 		case "smart_friend":
 			return SMART_FRIEND_TOOLS;
+		case "research":
+			return RESEARCH_TOOLS;
 		case "plan_clarifier":
 			return ORCHESTRATOR_TOOLS;
 		case "plan_codebase":
@@ -470,9 +615,32 @@ function formatSubagentToolLabel(toolName: string): string {
 			return "List";
 		case TINYFISH_TOOL_NAME:
 			return "TinyFish";
+		case PARALLEL_SEARCH_TOOL_NAME:
+			return "Parallel Search";
+		case PARALLEL_FETCH_TOOL_NAME:
+			return "Parallel Fetch";
 		default:
 			return toolName.length > 0 ? `${toolName.slice(0, 1).toUpperCase()}${toolName.slice(1)}` : "Tool";
 	}
+}
+
+function extractSubagentToolDiff(toolName: string, args: unknown, result: unknown): { diff?: string; diffFilePath?: string } {
+	const input = asRecord(args);
+	const resultRecord = asRecord(result);
+	const details = asRecord(resultRecord?.details);
+	const path = asString(input?.path);
+
+	if (toolName === "edit") {
+		const diff = asString(details?.diff);
+		return { diff, diffFilePath: path };
+	}
+
+	if (toolName === "write") {
+		const diff = asString(details?._diff);
+		return { diff, diffFilePath: path };
+	}
+
+	return {};
 }
 
 function formatSubagentToolDetail(toolName: string, args: unknown, result: unknown, isError: boolean): string {
@@ -496,13 +664,18 @@ function formatSubagentToolDetail(toolName: string, args: unknown, result: unkno
 		case "edit": {
 			const path = asString(input?.path) ?? "file";
 			const editCount = Array.isArray(input?.edits) ? input.edits.length : 1;
-			const diffStats = countDiffStats(asString(details?.diff) ?? "");
-			return `${path} • Applied ${editCount} ${editCount === 1 ? "edit" : "edits"} • +${diffStats.additions}/-${diffStats.removals}`;
+			const diff = asString(details?.diff) ?? "";
+			const diffStats = countDiffStats(diff);
+			const inlineSummary = diff.length > 0 ? ` · ${formatInlineDiffSummary(diff)}` : "";
+			return `${path} • Applied ${editCount} ${editCount === 1 ? "edit" : "edits"} • +${diffStats.additions}/-${diffStats.removals}${inlineSummary}`;
 		}
 		case "write": {
 			const path = asString(input?.path) ?? "file";
 			const lineCount = countLines(asString(input?.content) ?? output);
-			return `${path} • wrote ${lineCount} ${lineCount === 1 ? "line" : "lines"}`;
+			const diff = asString(details?._diff) ?? "";
+			const diffStats = diff.length > 0 ? countDiffStats(diff) : undefined;
+			const diffPart = diffStats ? ` · +${diffStats.additions}/-${diffStats.removals}` : "";
+			return `${path} • wrote ${lineCount} ${lineCount === 1 ? "line" : "lines"}${diffPart}`;
 		}
 		case "grep":
 		case "find":
@@ -515,6 +688,14 @@ function formatSubagentToolDetail(toolName: string, args: unknown, result: unkno
 			const target = asString(input?.url) ?? asString(input?.query) ?? "web";
 			const summary = output.length > 0 ? truncateOneLine(getFirstMeaningfulLine(output) ?? output, 100) : statusPrefix;
 			return `${target} • ${summary}`;
+		}
+		case PARALLEL_SEARCH_TOOL_NAME: {
+			const objective = asString(input?.objective) ?? asString(input?.query) ?? "web search";
+			return `${truncateOneLine(objective, 80)} • ${isError ? "failed" : "done"}`;
+		}
+		case PARALLEL_FETCH_TOOL_NAME: {
+			const urlStr = asString(input?.urls) ?? "url";
+			return `${truncateOneLine(urlStr, 80)} • ${isError ? "failed" : "done"}`;
 		}
 		default:
 			return output.length > 0 ? truncateOneLine(getFirstMeaningfulLine(output) ?? output, 100) : statusPrefix;
@@ -585,18 +766,54 @@ function truncateOneLine(value: string, maxLength: number): string {
 	return `${singleLine.slice(0, Math.max(0, maxLength - 1))}…`;
 }
 
-function getRoleToolOverrides(request: OrchSubagentRequest) {
-	const overrides: any[] = [];
+function emitSubagentDiffPreview(
+	request: OrchSubagentRequest,
+	label: string,
+	path: string,
+	diff: string | undefined,
+	error?: string,
+): void {
+	const detail = error
+		? `${path} • ${error}`
+		: diff && diff.length > 0
+			? `${path} • ${formatInlineDiffSummary(diff)}`
+			: `${path} • no textual changes`;
+	request.onStreamEvent?.({
+		role: request.role,
+		type: "tool_diff",
+		label,
+		detail,
+		diff,
+		diffFilePath: path,
+	});
+}
+
+function getRoleToolOverrides(request: OrchSubagentRequest): OrchRoleToolDefinition[] {
+	const overrides: OrchRoleToolDefinition[] = [];
 
 	if (getRequestedTools(request).includes(TINYFISH_TOOL_NAME)) {
 		overrides.push(createTinyFishToolDefinition());
+	}
+
+	if (getRequestedTools(request).includes(PARALLEL_SEARCH_TOOL_NAME)) {
+		overrides.push(createParallelSearchToolDefinition());
+	}
+
+	if (getRequestedTools(request).includes(PARALLEL_FETCH_TOOL_NAME)) {
+		overrides.push(createParallelFetchToolDefinition());
 	}
 
 	if (getRequestedTools(request).includes("bash")) {
 		const bashTool = createBashToolDefinition(request.cwd);
 		overrides.push({
 			...bashTool,
-			async execute(toolCallId, params, signal, onUpdate, ctx) {
+			async execute(
+				toolCallId: ToolExecuteParams<typeof bashTool>[0],
+				params: ToolExecuteParams<typeof bashTool>[1],
+				signal: ToolExecuteParams<typeof bashTool>[2],
+				onUpdate: ToolExecuteParams<typeof bashTool>[3],
+				ctx: ToolExecuteParams<typeof bashTool>[4],
+			) {
 				if (request.bashCommandGuard && !request.bashCommandGuard(params.command)) {
 					throw new Error(
 						request.bashGuardReason ??
@@ -617,6 +834,55 @@ function getRoleToolOverrides(request: OrchSubagentRequest) {
 		});
 	}
 
+	// Wrap mutating tools so every sub-agent edit/write emits a review-first diff event.
+	if (getRequestedTools(request).includes("edit")) {
+		const editTool = createEditToolDefinition(request.cwd);
+		overrides.push({
+			...editTool,
+			async execute(
+				toolCallId: ToolExecuteParams<typeof editTool>[0],
+				params: ToolExecuteParams<typeof editTool>[1],
+				signal: ToolExecuteParams<typeof editTool>[2],
+				onUpdate: ToolExecuteParams<typeof editTool>[3],
+				ctx: ToolExecuteParams<typeof editTool>[4],
+			) {
+				const preview = await computeEditPreviewDiff(request.cwd, params.path, params.edits);
+				if (preview.ok === true) {
+					emitSubagentDiffPreview(request, "Edit preview", params.path, preview.diff);
+				} else {
+					emitSubagentDiffPreview(request, "Edit preview", params.path, undefined, preview.error);
+				}
+				return editTool.execute(toolCallId, params, signal, onUpdate, ctx);
+			},
+		});
+	}
+
+	if (getRequestedTools(request).includes("write")) {
+		const writeTool = createWriteToolDefinition(request.cwd);
+		overrides.push({
+			...writeTool,
+			async execute(
+				toolCallId: ToolExecuteParams<typeof writeTool>[0],
+				params: ToolExecuteParams<typeof writeTool>[1],
+				signal: ToolExecuteParams<typeof writeTool>[2],
+				onUpdate: ToolExecuteParams<typeof writeTool>[3],
+				ctx: ToolExecuteParams<typeof writeTool>[4],
+			) {
+				const preview = await computeWritePreviewDiff(request.cwd, params.path, params.content);
+				if (preview.ok === true) {
+					emitSubagentDiffPreview(request, "Write preview", params.path, preview.diff);
+				} else {
+					emitSubagentDiffPreview(request, "Write preview", params.path, undefined, preview.error);
+				}
+				const result = await writeTool.execute(toolCallId, params, signal, onUpdate, ctx);
+				return {
+					...result,
+					details: { ...((result.details as Record<string, unknown>) ?? {}), _diff: preview.ok === true ? preview.diff : undefined },
+				};
+			},
+		});
+	}
+
 	if (request.role !== "validator") {
 		return overrides;
 	}
@@ -630,14 +896,26 @@ function getRoleToolOverrides(request: OrchSubagentRequest) {
 	overrides.push(
 		{
 			...readTool,
-			async execute(toolCallId, params, signal, onUpdate, ctx) {
+			async execute(
+				toolCallId: ToolExecuteParams<typeof readTool>[0],
+				params: ToolExecuteParams<typeof readTool>[1],
+				signal: ToolExecuteParams<typeof readTool>[2],
+				onUpdate: ToolExecuteParams<typeof readTool>[3],
+				ctx: ToolExecuteParams<typeof readTool>[4],
+			) {
 				assertValidatorPathAllowed(params.path, request.cwd, blockedRoots);
 				return readTool.execute(toolCallId, params, signal, onUpdate, ctx);
 			},
 		},
 		{
 			...grepTool,
-			async execute(toolCallId, params, signal, onUpdate, ctx) {
+			async execute(
+				toolCallId: ToolExecuteParams<typeof grepTool>[0],
+				params: ToolExecuteParams<typeof grepTool>[1],
+				signal: ToolExecuteParams<typeof grepTool>[2],
+				onUpdate: ToolExecuteParams<typeof grepTool>[3],
+				ctx: ToolExecuteParams<typeof grepTool>[4],
+			) {
 				const searchPath = resolveValidatorToolPath(request.cwd, params.path ?? ".");
 				assertValidatorAbsolutePathAllowed(searchPath, blockedRoots);
 				const result = await grepTool.execute(toolCallId, params, signal, onUpdate, ctx);
@@ -654,7 +932,13 @@ function getRoleToolOverrides(request: OrchSubagentRequest) {
 		},
 		{
 			...findTool,
-			async execute(toolCallId, params, signal, onUpdate, ctx) {
+			async execute(
+				toolCallId: ToolExecuteParams<typeof findTool>[0],
+				params: ToolExecuteParams<typeof findTool>[1],
+				signal: ToolExecuteParams<typeof findTool>[2],
+				onUpdate: ToolExecuteParams<typeof findTool>[3],
+				ctx: ToolExecuteParams<typeof findTool>[4],
+			) {
 				const searchPath = resolveValidatorToolPath(request.cwd, params.path ?? ".");
 				assertValidatorAbsolutePathAllowed(searchPath, blockedRoots);
 				const result = await findTool.execute(toolCallId, params, signal, onUpdate, ctx);
@@ -671,7 +955,13 @@ function getRoleToolOverrides(request: OrchSubagentRequest) {
 		},
 		{
 			...lsTool,
-			async execute(toolCallId, params, signal, onUpdate, ctx) {
+			async execute(
+				toolCallId: ToolExecuteParams<typeof lsTool>[0],
+				params: ToolExecuteParams<typeof lsTool>[1],
+				signal: ToolExecuteParams<typeof lsTool>[2],
+				onUpdate: ToolExecuteParams<typeof lsTool>[3],
+				ctx: ToolExecuteParams<typeof lsTool>[4],
+			) {
 				const searchPath = resolveValidatorToolPath(request.cwd, params.path ?? ".");
 				assertValidatorAbsolutePathAllowed(searchPath, blockedRoots);
 				const result = await lsTool.execute(toolCallId, params, signal, onUpdate, ctx);

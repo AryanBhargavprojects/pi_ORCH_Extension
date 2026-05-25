@@ -9,7 +9,7 @@ export type MissionSharedFeatureKind = "planned" | "fix";
 export type DelegationEventKind =
 	| { kind: "thinking"; text: string }
 	| { kind: "text"; text: string }
-	| { kind: "tool"; label: string; detail: string };
+	| { kind: "tool"; label: string; detail: string; diff?: string; diffFilePath?: string };
 
 export type DelegationStatus = "running" | "done" | "failed" | "aborted";
 

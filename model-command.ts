@@ -19,6 +19,8 @@ type CompletionItem = {
 	value: string;
 };
 
+const ORCH_MODEL_ROLE_NAMES = ORCH_ROLE_NAMES.filter((role) => role !== "orchestrator") as Exclude<OrchRoleName, "orchestrator">[];
+
 type OrchModelChoice = {
 	model: Model<Api>;
 	reference: string;
@@ -106,18 +108,22 @@ function parseOrchModelArgs(args: string): {
 	if (first.token && isOrchConfigScope(first.token)) {
 		scope = first.token;
 		remaining = first.rest;
-	} else if (first.token && isOrchRoleName(first.token)) {
+	} else if (first.token && isOrchModelRoleName(first.token)) {
 		role = first.token;
 		remaining = first.rest;
+	} else if (first.token === "orchestrator") {
+		return { error: "The main Pi agent is the Orch orchestrator; /orch-model only configures sub-agent roles." };
 	} else if (first.token) {
 		return { error: `Unknown scope or role: ${first.token}` };
 	}
 
 	if (!role) {
 		const second = consumeToken(remaining);
-		if (second.token && isOrchRoleName(second.token)) {
+		if (second.token && isOrchModelRoleName(second.token)) {
 			role = second.token;
 			remaining = second.rest;
+		} else if (second.token === "orchestrator") {
+			return { error: "The main Pi agent is the Orch orchestrator; /orch-model only configures sub-agent roles." };
 		} else if (second.token) {
 			return { error: `Unknown Orch role: ${second.token}` };
 		}
@@ -183,7 +189,7 @@ async function resolveRole(
 		return undefined;
 	}
 
-	const options = ORCH_ROLE_NAMES.map((name) => ({
+	const options = ORCH_MODEL_ROLE_NAMES.map((name) => ({
 		value: name,
 		label: `${name} — current ${configState.merged.roles[name].provider}/${configState.merged.roles[name].model}`,
 	}));
@@ -267,7 +273,7 @@ function buildAvailableModelsText(choices: OrchModelChoice[]): string {
 }
 
 function buildUsageText(): string {
-	const roles = ORCH_ROLE_NAMES.join("|");
+	const roles = ORCH_MODEL_ROLE_NAMES.join("|");
 	return [
 		"Usage:",
 		`  /${ORCH_COMMANDS.model}`,
@@ -279,7 +285,7 @@ function buildUsageText(): string {
 }
 
 function formatRoleModelSummary(configState: OrchLoadedConfig): string {
-	return ORCH_ROLE_NAMES.map(
+	return ORCH_MODEL_ROLE_NAMES.map(
 		(role) => `${role}=${configState.merged.roles[role].provider}/${configState.merged.roles[role].model}`,
 	).join(", ");
 }
@@ -287,21 +293,21 @@ function formatRoleModelSummary(configState: OrchLoadedConfig): string {
 function getOrchModelArgumentCompletions(prefix: string): CompletionItem[] | null {
 	const tokens = toCompletionTokens(prefix);
 	if (tokens.length === 0) {
-		return toCompletionItems(["project", "user", ...ORCH_ROLE_NAMES], "");
+		return toCompletionItems(["project", "user", ...ORCH_MODEL_ROLE_NAMES], "");
 	}
 
 	if (tokens.length === 1) {
-		return toCompletionItems(["project", "user", ...ORCH_ROLE_NAMES], tokens[0]);
+		return toCompletionItems(["project", "user", ...ORCH_MODEL_ROLE_NAMES], tokens[0]);
 	}
 
 	if (isOrchConfigScope(tokens[0])) {
 		if (tokens.length === 2) {
-			return toCompletionItems([...ORCH_ROLE_NAMES], tokens[1]);
+			return toCompletionItems([...ORCH_MODEL_ROLE_NAMES], tokens[1]);
 		}
 		return null;
 	}
 
-	if (isOrchRoleName(tokens[0])) {
+	if (isOrchModelRoleName(tokens[0])) {
 		return null;
 	}
 
@@ -349,8 +355,8 @@ function consumeToken(input: string): { rest: string; token?: string } {
 	};
 }
 
-function isOrchRoleName(value: string): value is OrchRoleName {
-	return ORCH_ROLE_NAMES.includes(value as OrchRoleName);
+function isOrchModelRoleName(value: string): value is OrchRoleName {
+	return ORCH_MODEL_ROLE_NAMES.includes(value as Exclude<OrchRoleName, "orchestrator">);
 }
 
 function showOutput(

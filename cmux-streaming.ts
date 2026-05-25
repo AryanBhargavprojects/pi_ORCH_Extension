@@ -185,7 +185,7 @@ async function createRoleStream(
 	const logFilePath = join(streamDir, `${role}.log`);
 	const header = [
 		`Orch ${role} stream`,
-		`Mission: ${missionId}`,
+		`Goal ID: ${missionId}`,
 		`Goal: ${goal}`,
 		"",
 	].join("\n");

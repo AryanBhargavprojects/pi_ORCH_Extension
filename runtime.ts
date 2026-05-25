@@ -59,6 +59,7 @@ export type OrchActiveMission = {
 	featuresState?: MissionFeaturesStateFile;
 	liveState?: MissionLiveState;
 	takeoverRequested: boolean;
+	cancelRequested?: boolean;
 	cmuxStreaming?: OrchCmuxMissionStreaming;
 	stateDir?: string;
 	stateFilePath?: string;
@@ -144,7 +145,7 @@ export function setOrchStatus(ctx: ExtensionContext, state: OrchRuntimeState): v
 	}
 
 	if (state.activeMission) {
-		parts.push(ctx.ui.theme.fg("accent", `mission:${state.activeMission.phase}`));
+		parts.push(ctx.ui.theme.fg("accent", `goal:${state.activeMission.phase}`));
 	}
 
 	if (state.activePlan) {
@@ -256,18 +257,18 @@ export function formatRuntimeSummary(state: OrchRuntimeState, cwd: string): stri
 		`sessionReason: ${sessionReason}`,
 		`sessionStartedAt: ${sessionStartedAt}`,
 		`cwd: ${cwd}`,
-		`commands: /${ORCH_COMMANDS.main} | /${ORCH_COMMANDS.main} ${ORCH_COMMANDS.goal} <goal> | /${ORCH_COMMANDS.model} | /${ORCH_COMMANDS.plan} | /${ORCH_COMMANDS.status} | /${ORCH_COMMANDS.reload} | /${ORCH_COMMANDS.takeover} | /reload`,
+		`commands: /${ORCH_COMMANDS.main} | /${ORCH_COMMANDS.main} ${ORCH_COMMANDS.goal} <goal> | /${ORCH_COMMANDS.main} ${ORCH_COMMANDS.goal} status | /${ORCH_COMMANDS.main} ${ORCH_COMMANDS.goal} cancel | /${ORCH_COMMANDS.model} | /${ORCH_COMMANDS.plan} | /${ORCH_COMMANDS.status} | /${ORCH_COMMANDS.reload} | /${ORCH_COMMANDS.takeover} | /reload`,
 	];
 
 	if (state.activeMission) {
 		lines.push(`activeGoal: ${state.activeMission.goal}`);
 		lines.push(`activeGoalPhase: ${state.activeMission.phase}`);
-		lines.push(`takeoverCommands: /${ORCH_COMMANDS.main} takeover | /${ORCH_COMMANDS.takeover}`);
+		lines.push(`goalControlCommands: /${ORCH_COMMANDS.main} ${ORCH_COMMANDS.goal} status | /${ORCH_COMMANDS.main} ${ORCH_COMMANDS.goal} cancel | /${ORCH_COMMANDS.main} takeover | /${ORCH_COMMANDS.takeover}`);
 		if (state.activeMission.stateDir) {
-			lines.push(`missionStateDir: ${state.activeMission.stateDir}`);
+			lines.push(`goalStateDir: ${state.activeMission.stateDir}`);
 		}
 		if (state.activeMission.stateFilePath) {
-			lines.push(`missionStateFile: ${state.activeMission.stateFilePath}`);
+			lines.push(`goalStateFile: ${state.activeMission.stateFilePath}`);
 		}
 		if (state.activeMission.cmuxStreaming?.enabled) {
 			const cmuxPanes = Object.values(state.activeMission.cmuxStreaming.roleStreams).filter(
@@ -306,7 +307,7 @@ export function formatRuntimeSummary(state: OrchRuntimeState, cwd: string): stri
 		lines.push(`userProfileFile: ${resolvedPaths.userProfileFile}`);
 		lines.push(`projectContextFile: ${resolvedPaths.projectContextFile}`);
 		lines.push(`knowledgeBaseFile: ${resolvedPaths.knowledgeBaseFile}`);
-		lines.push(`missionsDir: ${resolvedPaths.missionsDir}`);
+		lines.push(`goalRunsDir: ${resolvedPaths.missionsDir}`);
 		lines.push(`adaptationLogFile: ${resolvedPaths.adaptationLogFile}`);
 		lines.push(`plansDir: ${resolvedPaths.plansDir}`);
 

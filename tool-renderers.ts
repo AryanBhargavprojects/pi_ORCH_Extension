@@ -30,6 +30,15 @@ import {
 import { type Component, Text, truncateToWidth } from "@mariozechner/pi-tui";
 
 import { GLYPHS } from "./constants.js";
+import {
+	computeEditPreviewDiff,
+	computeWritePreviewDiff,
+	formatCompactDiffPreview,
+	formatDiffBlockEnhanced,
+	parseDiffHunks,
+	type DiffPreviewResult,
+	type ReplacementEdit,
+} from "./diff.js";
 import { formatElapsed, LOADING_VERBS } from "./loading.js";
 import type { DelegationBuffer, DelegationEventKind } from "./mission-types.js";
 
@@ -53,6 +62,18 @@ export type SmartFriendBuffer = {
 };
 
 type ToolContentBlock = TextContent | ImageContent;
+
+type DiffPreviewState = {
+	argsKey?: string;
+	pending?: boolean;
+	diff?: string;
+	error?: string;
+};
+
+type DiffRenderState = {
+	editPreview?: DiffPreviewState;
+	writePreview?: DiffPreviewState;
+};
 
 type BuiltInTools = {
 	read: ReturnType<typeof createReadToolDefinition>;
@@ -116,6 +137,23 @@ export function renderSmartFriendResult(
 	return new SmartFriendResultComponent(buffer, options.expanded === true, theme);
 }
 
+export function renderParallelCall(
+	args: unknown,
+	theme: OrchTheme,
+): Component {
+	return new ParallelCallComponent(args, theme);
+}
+
+export function renderParallelResult(
+	result: { content?: ToolContentBlock[]; details?: unknown },
+	options: { expanded?: boolean },
+	theme: OrchTheme,
+): Component {
+	const details = asPlainRecord(result.details);
+	const buffers = Array.isArray(details?.parallelBuffers) ? (details.parallelBuffers as DelegationBuffer[]) : [];
+	return new ParallelResultComponent(buffers, options.expanded === true, theme);
+}
+
 function registerReadRenderer(pi: ExtensionAPI): void {
 	const original = getBuiltInTools(process.cwd()).read;
 	pi.registerTool({
@@ -131,7 +169,7 @@ function registerReadRenderer(pi: ExtensionAPI): void {
 			return new Text(formatReadCall(args, context.cwd, theme), 0, 0);
 		},
 		renderResult(result, options, theme) {
-			return new Text(formatReadResult(result.content, result.details, options.expanded, theme), 0, 0);
+			return new Text(formatReadResult(result.content, asToolDetails<ReadToolDetails>(result.details), options.expanded, theme), 0, 0);
 		},
 	});
 }
@@ -152,7 +190,7 @@ function registerBashRenderer(pi: ExtensionAPI): void {
 		},
 		renderResult(result, options, theme, context) {
 			return new Text(
-				formatBashResult(result.content, result.details, options.expanded, theme, context.isError),
+				formatBashResult(result.content, asToolDetails<BashToolDetails>(result.details), options.expanded, theme, context.isError),
 				0,
 				0,
 			);
@@ -167,16 +205,20 @@ function registerEditRenderer(pi: ExtensionAPI): void {
 		label: "edit",
 		description: original.description,
 		parameters: original.parameters,
+		prepareArguments: original.prepareArguments,
+		promptSnippet: original.promptSnippet,
+		promptGuidelines: original.promptGuidelines,
 		renderShell: "self",
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			return getBuiltInTools(ctx.cwd).edit.execute(toolCallId, params, signal, onUpdate, ctx);
 		},
 		renderCall(args, theme, context) {
-			return new Text(formatEditCall(args, context.cwd, theme), 0, 0);
+			const preview = scheduleEditDiffPreview(args, context.cwd, context as unknown as { state: DiffRenderState; argsComplete: boolean; expanded: boolean; invalidate: () => void });
+			return new Text(formatEditCall(args, context.cwd, theme, preview, context.expanded), 0, 0);
 		},
 		renderResult(result, options, theme, context) {
 			return new Text(
-				formatEditResult(context.args, result.content, result.details, options.expanded, theme, context.isError),
+				formatEditResult(context.args, result.content, asToolDetails<EditToolDetails>(result.details), options.expanded, theme, context.isError),
 				0,
 				0,
 			);
@@ -191,15 +233,27 @@ function registerWriteRenderer(pi: ExtensionAPI): void {
 		label: "write",
 		description: original.description,
 		parameters: original.parameters,
+		promptSnippet: original.promptSnippet,
+		promptGuidelines: original.promptGuidelines,
 		renderShell: "self",
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
-			return getBuiltInTools(ctx.cwd).write.execute(toolCallId, params, signal, onUpdate, ctx);
+			const preview = await computeWritePreviewDiff(ctx.cwd, params.path, params.content);
+			const result = await getBuiltInTools(ctx.cwd).write.execute(toolCallId, params, signal, onUpdate, ctx);
+			return {
+				...result,
+				details: { ...((result.details as Record<string, unknown>) ?? {}), _diff: preview.ok ? preview.diff : undefined },
+			};
 		},
 		renderCall(args, theme, context) {
-			return new Text(formatWriteCall(args, context.cwd, theme), 0, 0);
+			const preview = scheduleWriteDiffPreview(args, context.cwd, context as unknown as { state: DiffRenderState; argsComplete: boolean; expanded: boolean; invalidate: () => void });
+			return new Text(formatWriteCall(args, context.cwd, theme, preview, context.expanded), 0, 0);
 		},
 		renderResult(result, options, theme, context) {
-			return new Text(formatWriteResult(context.args, result.content, options.expanded, theme, context.isError), 0, 0);
+			return new Text(
+				formatWriteResult(context.args, result.content, result.details, options.expanded, theme, context.isError),
+				0,
+				0,
+			);
 		},
 	});
 }
@@ -219,7 +273,7 @@ function registerFindRenderer(pi: ExtensionAPI): void {
 			return new Text(formatFindCall(args, context.cwd, theme), 0, 0);
 		},
 		renderResult(result, options, theme) {
-			return new Text(formatFindResult(result.content, result.details, options.expanded, theme), 0, 0);
+			return new Text(formatFindResult(result.content, asToolDetails<FindToolDetails>(result.details), options.expanded, theme), 0, 0);
 		},
 	});
 }
@@ -239,7 +293,7 @@ function registerGrepRenderer(pi: ExtensionAPI): void {
 			return new Text(formatGrepCall(args, context.cwd, theme), 0, 0);
 		},
 		renderResult(result, options, theme) {
-			return new Text(formatGrepResult(result.content, result.details, options.expanded, theme), 0, 0);
+			return new Text(formatGrepResult(result.content, asToolDetails<GrepToolDetails>(result.details), options.expanded, theme), 0, 0);
 		},
 	});
 }
@@ -259,7 +313,7 @@ function registerLsRenderer(pi: ExtensionAPI): void {
 			return new Text(formatLsCall(args, context.cwd, theme), 0, 0);
 		},
 		renderResult(result, options, theme) {
-			return new Text(formatLsResult(result.content, result.details, options.expanded, theme), 0, 0);
+			return new Text(formatLsResult(result.content, asToolDetails<LsToolDetails>(result.details), options.expanded, theme), 0, 0);
 		},
 	});
 }
@@ -279,6 +333,122 @@ function getBuiltInTools(cwd: string): BuiltInTools {
 		toolCache.set(cwd, tools);
 	}
 	return tools;
+}
+
+function scheduleEditDiffPreview(
+	args: unknown,
+	cwd: string,
+	context: { state: DiffRenderState; argsComplete: boolean; invalidate: () => void },
+): DiffPreviewState | undefined {
+	const input = getEditPreviewInput(args);
+	if (!input) {
+		context.state.editPreview = undefined;
+		return undefined;
+	}
+	const argsKey = JSON.stringify(input);
+	const preview = getOrResetPreviewState(context.state, "editPreview", argsKey);
+	if (context.argsComplete && !preview.pending && preview.diff === undefined && preview.error === undefined) {
+		preview.pending = true;
+		void computeEditPreviewDiff(cwd, input.path, input.edits).then((result) => {
+			applyPreviewResult(preview, argsKey, result);
+			context.invalidate();
+		});
+	}
+	return preview;
+}
+
+function scheduleWriteDiffPreview(
+	args: unknown,
+	cwd: string,
+	context: { state: DiffRenderState; argsComplete: boolean; invalidate: () => void },
+): DiffPreviewState | undefined {
+	const input = getWritePreviewInput(args);
+	if (!input) {
+		context.state.writePreview = undefined;
+		return undefined;
+	}
+	const argsKey = JSON.stringify({ path: input.path, contentLength: input.content.length, content: input.content });
+	const preview = getOrResetPreviewState(context.state, "writePreview", argsKey);
+	if (context.argsComplete && !preview.pending && preview.diff === undefined && preview.error === undefined) {
+		preview.pending = true;
+		void computeWritePreviewDiff(cwd, input.path, input.content).then((result) => {
+			applyPreviewResult(preview, argsKey, result);
+			context.invalidate();
+		});
+	}
+	return preview;
+}
+
+function getOrResetPreviewState(state: DiffRenderState, key: "editPreview" | "writePreview", argsKey: string): DiffPreviewState {
+	const existing = state[key];
+	if (existing?.argsKey === argsKey) {
+		return existing;
+	}
+	const next: DiffPreviewState = { argsKey, pending: false };
+	state[key] = next;
+	return next;
+}
+
+function applyPreviewResult(preview: DiffPreviewState, argsKey: string, result: DiffPreviewResult): void {
+	if (preview.argsKey !== argsKey) {
+		return;
+	}
+	preview.pending = false;
+	if (result.ok === true) {
+		preview.diff = result.diff;
+		preview.error = undefined;
+	} else {
+		preview.diff = undefined;
+		preview.error = result.error;
+	}
+}
+
+function getEditPreviewInput(args: unknown): { path: string; edits: ReplacementEdit[] } | undefined {
+	const record = asPlainRecord(args);
+	const path = typeof record?.path === "string" ? record.path : undefined;
+	const edits = Array.isArray(record?.edits) ? record.edits : undefined;
+	if (!path || !edits || edits.length === 0) {
+		return undefined;
+	}
+	const normalized: ReplacementEdit[] = [];
+	for (const edit of edits) {
+		const editRecord = asPlainRecord(edit);
+		if (typeof editRecord?.oldText !== "string" || typeof editRecord?.newText !== "string") {
+			return undefined;
+		}
+		normalized.push({ oldText: editRecord.oldText, newText: editRecord.newText });
+	}
+	return { path, edits: normalized };
+}
+
+function getWritePreviewInput(args: unknown): { path: string; content: string } | undefined {
+	const record = asPlainRecord(args);
+	const path = typeof record?.path === "string" ? record.path : undefined;
+	const content = typeof record?.content === "string" ? record.content : undefined;
+	return path && content !== undefined ? { path, content } : undefined;
+}
+
+function formatToolCallWithPreview(header: string, preview: DiffPreviewState | undefined, expanded: boolean, theme: OrchTheme): string {
+	if (!preview) {
+		return header;
+	}
+	const prefix = theme.fg("dim", "  │ ");
+	if (preview.pending) {
+		return [header, `${prefix}${theme.fg("muted", "Preparing diff preview…")}`].join("\n");
+	}
+	if (preview.error) {
+		return [header, `${prefix}${theme.fg("warning", preview.error)}`].join("\n");
+	}
+	if (preview.diff === undefined) {
+		return header;
+	}
+	if (preview.diff.length === 0) {
+		return [header, `${prefix}${theme.fg("muted", "No textual changes")}`].join("\n");
+	}
+	if (!expanded) {
+		return [header, ...formatCompactDiffPreview(preview.diff, theme, prefix)].join("\n");
+	}
+	return [header, formatDiffBlockEnhanced(preview.diff, theme, prefix)].join("\n");
 }
 
 class DelegateCallComponent implements Component {
@@ -359,6 +529,64 @@ class SmartFriendResultComponent implements Component {
 		const lines = this.buffer
 			? renderSmartFriendBuffer(this.buffer, this.expanded, this.theme, width)
 			: [buildSummaryLine(this.theme, this.theme.fg("success", "Guidance ready"), this.expanded)];
+		return lines.map((line) => truncateToWidth(line, width, this.theme.fg("dim", GLYPHS.ellipsis)));
+	}
+
+	invalidate(): void {
+		// Stateless.
+	}
+}
+
+class ParallelCallComponent implements Component {
+	constructor(
+		private readonly args: unknown,
+		private readonly theme: OrchTheme,
+	) {}
+
+	render(width: number): string[] {
+		const input = asPlainRecord(this.args);
+		const tasks = Array.isArray(input?.tasks) ? input.tasks as Array<{ role?: string; featureId?: string }> : [];
+		const count = tasks.length;
+		const roleCounts = new Map<string, number>();
+		for (const t of tasks) {
+			const role = t.role ?? "agent";
+			roleCounts.set(role, (roleCounts.get(role) ?? 0) + 1);
+		}
+		const roleSummary = [...roleCounts.entries()]
+			.map(([role, n]) => (n > 1 ? `${n}×${role}` : role))
+			.join(", ");
+		const header = [
+			this.theme.fg("toolTitle", this.theme.bold("Parallel ")),
+			this.theme.fg("accent", `${count} ${count === 1 ? "task" : "tasks"}`),
+			roleSummary ? this.theme.fg("dim", `  (${roleSummary})`) : "",
+		].join("");
+		return [truncateToWidth(header, width, this.theme.fg("dim", GLYPHS.ellipsis))];
+	}
+
+	invalidate(): void {
+		// Stateless.
+	}
+}
+
+class ParallelResultComponent implements Component {
+	constructor(
+		private readonly buffers: DelegationBuffer[],
+		private readonly expanded: boolean,
+		private readonly theme: OrchTheme,
+	) {}
+
+	render(width: number): string[] {
+		if (this.buffers.length === 0) {
+			return [buildSummaryLine(this.theme, this.theme.fg("muted", "No parallel results"), this.expanded)];
+		}
+
+		const lines: string[] = [];
+		for (const buffer of this.buffers) {
+			const roleLabel = this.theme.fg("accent", `${buffer.role} · ${buffer.featureId}`);
+			const badge = renderDelegationBadge(buffer, this.theme);
+			const summary = this.theme.fg("dim", `${buffer.edits}e ${buffer.bashes}b ${buffer.reads}r · ${formatElapsed(buffer.elapsedMs)}`);
+			lines.push(buildSummaryLine(this.theme, `${roleLabel}  ${badge}  ${summary}`, this.expanded));
+		}
 		return lines.map((line) => truncateToWidth(line, width, this.theme.fg("dim", GLYPHS.ellipsis)));
 	}
 
@@ -569,9 +797,13 @@ function renderDelegationEvent(event: DelegationEventKind, theme: OrchTheme, wat
 			.map((line) => `${waterfallPrefix}${theme.fg("toolOutput", line)}`);
 	}
 
-	return [
+	const lines: string[] = [
 		`${waterfallPrefix}${theme.fg("toolTitle", theme.bold(`${event.label}  `))}${theme.fg("accent", event.detail)}`,
 	];
+	if (event.diff && event.diff.length > 0) {
+		lines.push(...formatDiffBlockEnhanced(event.diff, theme, waterfallPrefix).split("\n"));
+	}
+	return lines;
 }
 
 function getDelegationWarnings(buffer: DelegationBuffer): Array<{ title: string; details: string }> {
@@ -617,7 +849,7 @@ function asDelegationBuffer(value: unknown): DelegationBuffer | undefined {
 	const status = record.status;
 	const role = record.role;
 	if (
-		(role !== "orchestrator" && role !== "worker" && role !== "validator" && role !== "smart_friend" && role !== "plan_clarifier" && role !== "plan_codebase" && role !== "plan_researcher" && role !== "plan_feasibility" && role !== "plan_synthesizer") ||
+		(role !== "orchestrator" && role !== "worker" && role !== "validator" && role !== "smart_friend" && role !== "research" && role !== "plan_clarifier" && role !== "plan_codebase" && role !== "plan_researcher" && role !== "plan_feasibility" && role !== "plan_synthesizer") ||
 		(status !== "running" && status !== "done" && status !== "failed" && status !== "aborted") ||
 		!Array.isArray(record.events)
 	) {
@@ -752,6 +984,10 @@ function asSmartFriendBuffer(value: unknown): SmartFriendBuffer | undefined {
 	return record as SmartFriendBuffer;
 }
 
+function asToolDetails<T>(value: unknown): T | undefined {
+	return value as T | undefined;
+}
+
 function asPlainRecord(value: unknown): Record<string, unknown> | undefined {
 	return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
@@ -824,8 +1060,9 @@ function formatBashResult(
 	return [summary, formatExpandedBlock(output, theme)].join("\n");
 }
 
-function formatEditCall(args: EditToolInput, cwd: string, theme: OrchTheme): string {
-	return [theme.fg("toolTitle", theme.bold("Edit ")), theme.fg("accent", formatPathForDisplay(args.path, cwd))].join("");
+function formatEditCall(args: EditToolInput, cwd: string, theme: OrchTheme, preview: DiffPreviewState | undefined, expanded: boolean): string {
+	const header = [theme.fg("toolTitle", theme.bold("Edit ")), theme.fg("accent", formatPathForDisplay(args.path, cwd))].join("");
+	return formatToolCallWithPreview(header, preview, expanded, theme);
 }
 
 function formatEditResult(
@@ -849,35 +1086,51 @@ function formatEditResult(
 	const diff = details?.diff ?? "";
 	const diffStats = countDiffStats(diff);
 	const replacements = args.edits.length;
-	const summary = buildSummaryLine(
-		theme,
-		[
-			theme.fg("success", `Applied ${replacements} ${pluralize(replacements, "edit")}`),
-			theme.fg("dim", " • "),
-			theme.fg("success", `+${diffStats.additions}`),
-			theme.fg("dim", "/"),
-			theme.fg("error", `-${diffStats.removals}`),
-		].join(""),
-		expanded,
-	);
-	if (!expanded || diff.length === 0) {
-		return summary;
+	const hunks = diff.length > 0 ? parseDiffHunks(diff) : [];
+
+	// Build the collapsed summary line.
+	const summaryParts = [
+		theme.fg("success", `Applied ${replacements} ${pluralize(replacements, "edit")}`),
+		theme.fg("dim", " • "),
+		theme.fg("success", `+${diffStats.additions}`),
+		theme.fg("dim", "/"),
+		theme.fg("error", `-${diffStats.removals}`),
+	];
+	const hasDiff = diff.length > 0;
+	const summary = buildSummaryLine(theme, summaryParts.join(""), expanded);
+
+	if (!expanded) {
+		// Collapsed: show summary + compact hunk headers (when diff available).
+		if (!hasDiff) return summary;
+		const hunkLines = hunks.slice(0, 3).map((h) => {
+			const header = `@@ -${h.oldStart},${h.oldCount} +${h.newStart},${h.newCount} @@`;
+			return `${getWaterfallPrefix(theme)}${theme.fg("dim", header)}`;
+		});
+		if (hunks.length > 3) {
+			hunkLines.push(`${getWaterfallPrefix(theme)}${theme.fg("dim", `... ${hunks.length - 3} more hunks`)}`);
+		}
+		return [summary, ...hunkLines].join("\n");
 	}
 
-	return [summary, formatDiffBlock(diff, theme)].join("\n");
+	// Expanded: show summary + enhanced diff with hunk headers.
+	if (!hasDiff) return summary;
+	const enhancedDiff = formatDiffBlockEnhanced(diff, theme, getWaterfallPrefix(theme));
+	return [summary, enhancedDiff].join("\n");
 }
 
-function formatWriteCall(args: WriteToolInput, cwd: string, theme: OrchTheme): string {
-	return [
+function formatWriteCall(args: WriteToolInput, cwd: string, theme: OrchTheme, preview: DiffPreviewState | undefined, expanded: boolean): string {
+	const header = [
 		theme.fg("toolTitle", theme.bold("Write(")),
 		theme.fg("accent", formatPathForDisplay(args.path, cwd)),
 		theme.fg("toolTitle", theme.bold(")")),
 	].join("");
+	return formatToolCallWithPreview(header, preview, expanded, theme);
 }
 
 function formatWriteResult(
 	args: WriteToolInput,
 	content: ToolContentBlock[],
+	details: unknown,
 	expanded: boolean,
 	theme: OrchTheme,
 	isError: boolean,
@@ -892,12 +1145,31 @@ function formatWriteResult(
 		return [summary, formatExpandedBlock(textContent, theme)].join("\n");
 	}
 
+	const detailsRecord = asPlainRecord(details);
+	const diff = typeof detailsRecord?._diff === "string" ? detailsRecord._diff : "";
 	const lineCount = countLines(args.content);
-	const summary = buildSummaryLine(theme, theme.fg("success", `Wrote ${lineCount} ${pluralize(lineCount, "line")}`), expanded);
-	if (!expanded) {
-		return summary;
+	const diffStats = countDiffStats(diff);
+	const summary = buildSummaryLine(
+		theme,
+		[
+			theme.fg("success", `Wrote ${lineCount} ${pluralize(lineCount, "line")}`),
+			diff.length > 0 ? theme.fg("dim", " • ") : "",
+			diff.length > 0 ? theme.fg("success", `+${diffStats.additions}`) : "",
+			diff.length > 0 ? theme.fg("dim", "/") : "",
+			diff.length > 0 ? theme.fg("error", `-${diffStats.removals}`) : "",
+		].join(""),
+		expanded,
+	);
+
+	if (diff.length === 0) {
+		return expanded ? [summary, formatExpandedBlock(args.content, theme)].join("\n") : summary;
 	}
-	return [summary, formatExpandedBlock(args.content, theme)].join("\n");
+
+	if (!expanded) {
+		return [summary, ...formatCompactDiffPreview(diff, theme, getWaterfallPrefix(theme))].join("\n");
+	}
+
+	return [summary, formatDiffBlockEnhanced(diff, theme, getWaterfallPrefix(theme))].join("\n");
 }
 
 function formatFindCall(args: FindToolInput, cwd: string, theme: OrchTheme): string {

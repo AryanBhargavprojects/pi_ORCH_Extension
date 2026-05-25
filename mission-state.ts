@@ -21,6 +21,7 @@ const GUIDELINES_LIMIT: Record<OrchRoleName, number> = {
 	worker: 4000,
 	validator: 0,
 	smart_friend: 0,
+	research: 4000,
 	plan_clarifier: 4000,
 	plan_codebase: 4000,
 	plan_researcher: 4000,
@@ -32,6 +33,7 @@ const KNOWLEDGE_BASE_LIMIT: Record<OrchRoleName, number> = {
 	worker: 3500,
 	validator: 5000,
 	smart_friend: 5000,
+	research: 5000,
 	plan_clarifier: 5000,
 	plan_codebase: 5000,
 	plan_researcher: 5000,
@@ -43,6 +45,7 @@ const VALIDATION_CONTRACT_LIMIT: Record<OrchRoleName, number> = {
 	worker: 4000,
 	validator: 4000,
 	smart_friend: 4000,
+	research: 4000,
 	plan_clarifier: 4000,
 	plan_codebase: 4000,
 	plan_researcher: 4000,
@@ -125,7 +128,7 @@ export async function setMissionFeatureState(
 	return updateMissionFeaturesState(handle, (state) => {
 		const feature = state.features.find((entry) => entry.id === featureId);
 		if (!feature) {
-			throw new Error(`Mission state feature not found: ${featureId}`);
+			throw new Error(`Goal state feature not found: ${featureId}`);
 		}
 
 		if (patch.status !== undefined) {
@@ -193,7 +196,7 @@ export async function setMissionMilestoneState(
 	return updateMissionFeaturesState(handle, (state) => {
 		const milestone = state.milestones.find((entry) => entry.id === milestoneId);
 		if (!milestone) {
-			throw new Error(`Mission state milestone not found: ${milestoneId}`);
+			throw new Error(`Goal state milestone not found: ${milestoneId}`);
 		}
 
 		if (patch.status !== undefined) {
@@ -314,15 +317,15 @@ export function buildSharedStatePromptSection(
 	includeGuidelines: boolean,
 ): string[] {
 	const lines = [
-		"Shared mission state:",
-		`- Mission directory: ${sharedState.missionDir}`,
+		"Shared goal state:",
+		`- Goal state directory: ${sharedState.missionDir}`,
 		`- Plan file: ${sharedState.planFile}`,
 		`- Features file: ${sharedState.featuresFile}`,
 		`- Validation contract file: ${sharedState.validationContractFile}`,
 		`- Knowledge base file: ${sharedState.knowledgeBaseFile}`,
 		`- Guidelines file: ${sharedState.guidelinesFile}`,
 		`- Runtime state file: ${sharedState.stateFile}`,
-		"Mission runtime summary:",
+		"Goal runtime summary:",
 		sharedState.missionStateSummary,
 		"Current milestone summary:",
 		sharedState.currentMilestoneSummary,
@@ -438,9 +441,9 @@ function renderValidationContractMarkdown(contract: ValidationContract): string 
 }
 
 function renderGuidelinesMarkdown(plan: MissionPlan): string {
-	const lines = ["# Mission Guidelines", ""];
+	const lines = ["# Goal Guidelines", ""];
 	if (plan.guidelines.length === 0) {
-		lines.push("- No additional mission guidelines were generated during planning.");
+		lines.push("- No additional goal guidelines were generated during planning.");
 	} else {
 		for (const guideline of plan.guidelines) {
 			lines.push(`- ${guideline}`);
@@ -465,9 +468,9 @@ function renderGuidelinesMarkdown(plan: MissionPlan): string {
 
 function renderKnowledgeBaseMarkdown(plan: MissionPlan, goal: string): string {
 	const lines = [
-		"# Mission Knowledge Base",
+		"# Goal Knowledge Base",
 		"",
-		`Mission: ${plan.missionTitle}`,
+		`Goal title: ${plan.missionTitle}`,
 		`Goal: ${goal}`,
 		"",
 		"## Initial context",
@@ -484,7 +487,7 @@ function renderKnowledgeBaseMarkdown(plan: MissionPlan, goal: string): string {
 
 function formatMissionStateSummary(state: MissionLiveState): string {
 	return [
-		`Mission phase: ${state.phase}`,
+		`Goal phase: ${state.phase}`,
 		`Current milestone: ${state.currentMilestoneId ?? "none"}`,
 		`Current feature: ${state.currentFeatureId ?? "none"}`,
 		`Current attempt: ${state.currentAttempt ?? "none"}`,
@@ -551,7 +554,7 @@ async function updateMissionFeaturesState(
 	handle: MissionStateHandle,
 	mutate: (state: MissionFeaturesStateFile) => void,
 ): Promise<MissionFeaturesStateFile> {
-	// TODO: add file locking if future Orch phases allow parallel workers/writers for mission state.
+	// TODO: add file locking if future Orch phases allow parallel workers/writers for goal state.
 	const state = await readJsonFile<MissionFeaturesStateFile>(handle.paths.featuresFile);
 	mutate(state);
 	await writeJsonFile(handle.paths.featuresFile, state);

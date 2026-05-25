@@ -16,12 +16,14 @@ import { registerCompactToolRenderers } from "./tool-renderers.js";
 import { disposeOrchSubagentSessions } from "./role-runner.js";
 import { clearTodoUi, registerTodoWriteTool } from "./todos.js";
 import { registerTinyFishTool } from "./tinyfish.js";
+import { registerParallelTools } from "./parallel-tools.js";
 import { registerCmuxIntegration } from "./cmux-integration.js";
 
 export default function orchExtension(pi: ExtensionAPI): void {
 	const runtimeState = createRuntimeState();
 
 	registerTinyFishTool(pi);
+	registerParallelTools(pi);
 	registerCmuxIntegration(pi, runtimeState);
 	registerOrchMessageRenderer(pi);
 	registerOrchLoadingIndicator(pi);

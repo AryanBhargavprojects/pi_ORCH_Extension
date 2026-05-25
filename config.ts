@@ -8,6 +8,7 @@ export const ORCH_ROLE_NAMES = [
 	"worker",
 	"validator",
 	"smart_friend",
+	"research",
 	"plan_clarifier",
 	"plan_codebase",
 	"plan_researcher",
@@ -94,6 +95,8 @@ export const ORCH_CONFIG_KEYS = [
 	"roles.validator.model",
 	"roles.smart_friend.provider",
 	"roles.smart_friend.model",
+	"roles.research.provider",
+	"roles.research.model",
 	"roles.plan_clarifier.provider",
 	"roles.plan_clarifier.model",
 	"roles.plan_codebase.provider",
@@ -154,6 +157,14 @@ export const ORCH_CONFIG_KEY_INFO: Record<
 		description: "Model used by the Orch smart friend advisor",
 		valueType: "string",
 	},
+	"roles.research.provider": {
+		description: "Provider used by the Orch general research sub-agent",
+		valueType: "string",
+	},
+	"roles.research.model": {
+		description: "Model used by the Orch general research sub-agent",
+		valueType: "string",
+	},
 	"roles.plan_clarifier.provider": {
 		description: "Provider used by the Orch Plan Mode clarifier",
 		valueType: "string",
@@ -211,11 +222,11 @@ export const ORCH_CONFIG_KEY_INFO: Record<
 		valueType: "string",
 	},
 	"paths.knowledgeBaseFile": {
-		description: "Mission knowledge-base file, relative to the project root unless absolute",
+		description: "Goal knowledge-base file, relative to the project root unless absolute",
 		valueType: "string",
 	},
 	"paths.missionsDir": {
-		description: "Mission working directory, relative to the project root unless absolute",
+		description: "Goal working directory, relative to the project root unless absolute",
 		valueType: "string",
 	},
 	"paths.adaptationLogFile": {
@@ -254,6 +265,10 @@ const DEFAULT_ORCH_CONFIG: OrchConfig = {
 			provider: "anthropic",
 			model: "claude-opus-4-7",
 		},
+		research: {
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+		},
 		plan_clarifier: {
 			provider: "anthropic",
 			model: "claude-opus-4-5",
@@ -283,7 +298,7 @@ const DEFAULT_ORCH_CONFIG: OrchConfig = {
 		userProfileFile: "orch/user-profile.json",
 		projectContextFile: ".pi/orch/project-context.json",
 		knowledgeBaseFile: ".pi/orch/knowledge-base.json",
-		missionsDir: ".pi/orch/missions",
+		missionsDir: ".pi/orch/goals",
 		adaptationLogFile: ".pi/orch/adaptation-log.jsonl",
 		plansDir: ".pi/orch/plans",
 	},
@@ -348,6 +363,8 @@ export function getEffectiveOrchConfigValue(config: OrchConfig, key: OrchConfigK
 			return config.paths.adaptationLogFile;
 		case "paths.plansDir":
 			return config.paths.plansDir;
+		default:
+			throw new Error(`Unhandled Orch config key: ${key}`);
 	}
 }
 
@@ -763,8 +780,8 @@ function setValueInOverrides(overrides: OrchConfigOverrides, key: OrchConfigKey,
 	const roleKey = parseRoleConfigKey(key);
 	if (roleKey) {
 		overrides.roles ??= {};
-		overrides.roles[roleKey.role] ??= {};
-		overrides.roles[roleKey.role][roleKey.field] = value as string;
+		const roleOverrides = (overrides.roles[roleKey.role] ??= {});
+		roleOverrides[roleKey.field] = value as string;
 		return;
 	}
 

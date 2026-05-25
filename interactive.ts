@@ -10,20 +10,26 @@ import { loadOrchRolePrompt } from "./prompt-loader.js";
 import { spawnOrchSubagent, type OrchSubagentStreamEvent } from "./role-runner.js";
 import type { OrchRuntimeState } from "./runtime.js";
 import { TINYFISH_TOOL_NAME } from "./tinyfish.js";
+import { PARALLEL_SEARCH_TOOL_NAME, PARALLEL_FETCH_TOOL_NAME } from "./parallel-tools.js";
 import {
 	renderDelegateCall,
 	renderDelegateResult,
+	renderParallelCall,
+	renderParallelResult,
 	renderSmartFriendCall,
 	renderSmartFriendResult,
 	type SmartFriendBuffer,
 } from "./tool-renderers.js";
 
-const DELEGATE_ROLE_NAMES = ["worker", "validator", "plan_codebase", "plan_researcher"] as const;
+const DELEGATE_ROLE_NAMES = ["worker", "validator", "plan_codebase", "plan_researcher", "research"] as const;
 type DelegateRoleName = (typeof DELEGATE_ROLE_NAMES)[number];
 
+const PARALLEL_ROLE_NAMES = ["plan_codebase", "plan_researcher", "research"] as const;
+type ParallelRoleName = (typeof PARALLEL_ROLE_NAMES)[number];
+
 const INTERACTIVE_CODEBASE_TOOLS = ["read", "grep", "find", "ls"] as const;
-const INTERACTIVE_RESEARCH_TOOLS = ["read", "bash", "grep", "find", "ls", TINYFISH_TOOL_NAME] as const;
-const INTERACTIVE_RESEARCH_BASH_GUARD_REASON = "Interactive research delegation only allows read-only bash commands. Use read, grep, find, ls, or safe inspection/fetch commands.";
+const INTERACTIVE_RESEARCH_TOOLS = ["read", "bash", "grep", "find", "ls", TINYFISH_TOOL_NAME, PARALLEL_SEARCH_TOOL_NAME, PARALLEL_FETCH_TOOL_NAME] as const;
+const INTERACTIVE_RESEARCH_BASH_GUARD_REASON = "Interactive research delegation only allows read-only bash commands. Use read, grep, find, ls, ctx7, parallel_search, parallel_fetch, or safe inspection/fetch commands. The bash guard blocks pipes and redirections — use the first-class parallel_search and parallel_fetch tools for web research.";
 const FAST_ZERO_TOOL_WARNING_MS = 2000;
 
 const INTERACTIVE_DESTRUCTIVE_BASH_PATTERNS = [
@@ -61,6 +67,9 @@ const INTERACTIVE_SAFE_BASH_PATTERNS = [
 	/^\s*pnpm\s+(list|view|info|why|audit|outdated)\b/i,
 	/^\s*node\s+--version\b/i,
 	/^\s*python\d*\s+--version\b/i,
+	/^\s*ctx7\s+(?:library|docs|whoami|--version|-V|--help)\b/i,
+	/^\s*npx\s+(?:(?:--yes|-y)\s+)?ctx7(?:@latest)?\s+(?:library|docs|whoami|--version|-V|--help)\b/i,
+	/^\s*parallel-cli\s+(?:auth|search|extract|fetch|research\s+(?:run|status|poll|processors)|findall\s+(?:run|status|poll|result)|skills\s+list|--version|--help)\b/i,
 	/^\s*curl\s+(-[fsSLI]+\s+)?https?:\/\//i,
 	/^\s*wget\s+-O\s*-\s+https?:\/\//i,
 ];
@@ -69,19 +78,21 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 	pi.registerTool({
 		name: ORCH_TOOL_NAMES.delegate,
 		label: "Orch Delegate",
-		description: "Run an Orch sub-agent with the configured worker, validator, codebase analyst, or docs researcher model. Validator runs are always fresh; other roles may reuse cached context.",
-		promptSnippet: "Delegate focused implementation, validation, codebase analysis, or docs/API research to an Orch role session. Validators are fresh; other roles may reuse context.",
+		description: "Run an Orch sub-agent with the configured worker, validator, codebase analyst, docs researcher, or general research model. Validator runs are always fresh; other roles may reuse cached context.",
+		promptSnippet: "Delegate focused implementation, validation, codebase analysis, docs/API research, or general web research to an Orch role session. Validators are fresh; other roles may reuse context.",
 		promptGuidelines: [
+			"Use orch_delegate with role=worker for ANY code change — always delegate implementation unless it is a trivial one-liner.",
+			"Use orch_delegate with role=validator for independent review after a worker completes.",
 			"Use orch_delegate with role=plan_codebase for broad repository/codebase reading, architecture discovery, multi-file context gathering, or unfamiliar project analysis.",
-			"Use orch_delegate with role=plan_researcher for documentation, framework, package, SDK, API, README, or external official-docs research.",
-			"Use orch_delegate with role=worker for scoped implementation and role=validator for independent review.",
-			"Use main-session built-in tools only for very small targeted reads needed for important immediate context, such as one known file or a short snippet; do not do broad docs/codebase sweeps in the main context.",
+			"Use orch_delegate with role=plan_researcher for planning-specific documentation, framework, package, SDK, API, README, or external official-docs research. The researcher has first-class parallel_search and parallel_fetch tools — avoid bash parallel-cli.",
+			"Use orch_delegate with role=research for general-purpose web, docs, current-info, Context7, Parallel (first-class tools), or TinyFish research outside Plan Mode. The researcher has first-class parallel_search and parallel_fetch tools.",
+			"Use main-session built-in tools ONLY for trivial tasks: a single short file read, a one-line fix, or a quick factual answer. Delegate everything else.",
 			"Do not delegate orchestration through orch_delegate; the main chat agent remains the orchestrator in interactive mode and decides whether to work directly, plan, or delegate.",
 			"When delegating, include the relevant file paths, constraints, and expected output in the task itself. Validator runs start fresh; other roles may retain prior Orch sub-agent context.",
 		],
 		parameters: Type.Object({
 			role: StringEnum(DELEGATE_ROLE_NAMES, {
-				description: "Which Orch role to run: validator always gets a fresh context; worker, plan_codebase, and plan_researcher may reuse cached Orch context",
+				description: "Which Orch role to run: validator always gets a fresh context; worker, plan_codebase, plan_researcher, and research may reuse cached Orch context",
 			}),
 			task: Type.String({ description: "Self-contained task for the selected Orch role" }),
 			featureId: Type.Optional(Type.String({ description: "Optional short feature/task id for the inline delegate header" })),
@@ -122,6 +133,7 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 
 				applyDelegationFinalOutput(buffer, role, result.output);
 				applyDelegationRunWarnings(buffer, role, result.toolCalls, result.elapsedMs);
+				applyDelegationOutputSourceWarnings(buffer, result.emptyFinalText, result.outputSource);
 				updateDelegationTiming(buffer);
 				emitUpdate();
 
@@ -144,6 +156,9 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 						modelId: result.modelId,
 						usage: result.usage,
 						toolCalls: result.toolCalls,
+						toolEvents: result.toolEvents,
+						outputSource: result.outputSource,
+						emptyFinalText: result.emptyFinalText,
 						elapsedMs: result.elapsedMs,
 					},
 				};
@@ -167,6 +182,130 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 		},
 	});
 
+	// ── orch_parallel ──
+	pi.registerTool({
+		name: ORCH_TOOL_NAMES.parallel,
+		label: "Orch Parallel",
+		description: "Run multiple read-only Orch sub-agents in parallel for concurrent intelligence gathering. Only plan_codebase, plan_researcher, and research roles are supported — no mutations.",
+		promptSnippet: "Run multiple read-only Orch sub-agents concurrently for intelligence gathering. Only plan_codebase, plan_researcher, and research roles.",
+		promptGuidelines: [
+			"Use orch_parallel to run multiple read-only sub-agents concurrently in a single call.",
+			"Only read-only roles are allowed: plan_codebase (code exploration), plan_researcher (docs/API research), research (general web/docs research).",
+			"Each task in the tasks array runs independently; they do not share state.",
+			"Worker and validator are NOT allowed in parallel — use sequential orch_delegate for implementation and review.",
+			"Keep each task self-contained with clear instructions and expected output.",
+		],
+		parameters: Type.Object({
+			tasks: Type.Array(Type.Object({
+				role: StringEnum(PARALLEL_ROLE_NAMES, {
+					description: "Read-only Orch role for this parallel task: plan_codebase (code exploration), plan_researcher (docs/API research), research (general web/docs research)",
+				}),
+				task: Type.String({ description: "Self-contained task for this role" }),
+				featureId: Type.Optional(Type.String({ description: "Optional short label for this parallel task" })),
+			}), { description: "Array of read-only tasks to run in parallel. Each task specifies a role and a task description." }),
+		}),
+		executionMode: "sequential",
+		renderShell: "self",
+		renderCall: renderParallelCall,
+		renderResult: renderParallelResult,
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			state.configState = await loadOrchConfig(ctx.cwd);
+			const tasks = params.tasks as Array<{ role: DelegateRoleName; task: string; featureId?: string }>;
+
+			// Reject mutating roles at runtime
+			for (const task of tasks) {
+				if (task.role === "worker" || task.role === "validator") {
+					throw new Error(
+						`orch_parallel only accepts read-only roles (plan_codebase, plan_researcher, research). ` +
+						`Got role="${task.role}". Use orch_delegate for sequential worker/validator runs.`,
+					);
+				}
+			}
+
+			const settleResults = await Promise.allSettled(
+				tasks.map(async (task, index) => {
+					const buffer = createDelegationBuffer(task.role, task.featureId ?? deriveDelegationFeatureId(task.task));
+					if (signal?.aborted) {
+						buffer.status = "aborted";
+						buffer.finalSummary = "Aborted.";
+						return { index, role: task.role, status: "aborted" as const, output: "Aborted.", elapsedMs: 0, buffer };
+					}
+					const startedAt = Date.now();
+					try {
+						const result = await spawnOrchSubagent({
+							role: task.role,
+							prompt: buildInteractiveDelegationPrompt(task.role, task.task),
+							cwd: ctx.cwd,
+							configState: state.configState!,
+							modelRegistry: ctx.modelRegistry,
+							forceFresh: true,
+							signal,
+							...getInteractiveDelegationOptions(task.role),
+							onStreamEvent: (event) => {
+								applyDelegationStreamEvent(buffer, event);
+								updateDelegationTiming(buffer);
+							},
+						});
+						applyDelegationFinalOutput(buffer, task.role, result.output);
+						applyDelegationRunWarnings(buffer, task.role, result.toolCalls, result.elapsedMs);
+						applyDelegationOutputSourceWarnings(buffer, result.emptyFinalText, result.outputSource);
+						updateDelegationTiming(buffer);
+						return {
+							index,
+							role: task.role,
+							featureId: task.featureId,
+							status: "success" as const,
+							output: result.output,
+							outputSource: result.outputSource,
+							emptyFinalText: result.emptyFinalText,
+							elapsedMs: result.elapsedMs || Date.now() - startedAt,
+							toolCalls: result.toolCalls,
+							buffer: cloneDelegationBuffer(buffer),
+						};
+					} catch (error) {
+						buffer.status = signal?.aborted || buffer.status === "aborted" ? "aborted" : "failed";
+						buffer.finalSummary = formatDelegationError(error);
+						updateDelegationTiming(buffer);
+						return {
+							index,
+							role: task.role,
+							featureId: task.featureId,
+							status: "failed" as const,
+							output: String(error),
+							outputSource: "tool_fallback" as const,
+							emptyFinalText: false,
+							elapsedMs: Date.now() - startedAt,
+							toolCalls: 0,
+							buffer: cloneDelegationBuffer(buffer),
+						};
+					}
+				}),
+			);
+
+			const outputs: string[] = [];
+			const parallelBuffers: DelegationBuffer[] = [];
+			for (const settled of settleResults) {
+				if (settled.status === "fulfilled") {
+					const r = settled.value;
+					parallelBuffers.push(r.buffer);
+					const label = r.featureId ?? `${r.role}-${r.index}`;
+					const degraded = r.emptyFinalText ? ` • ${r.outputSource}` : "";
+					const header = `## ${r.status === "success" ? "✓" : "✗"} Task ${r.index}: ${label} (${r.role}) — ${formatElapsed(r.elapsedMs)} • ${r.toolCalls} tool calls${degraded}`;
+					outputs.push(header);
+					if (r.buffer.finalWarnings.length > 0) {
+						outputs.push("", ...r.buffer.finalWarnings.map((warning) => `> Warning: ${warning.title} — ${warning.details}`));
+					}
+					outputs.push("", r.output.trim().length > 0 ? r.output : r.buffer.finalSummary || "No result provided.", "");
+				} else {
+					outputs.push(`## ✗ Task rejected: ${String(settled.reason)}`, "");
+				}
+			}
+
+			return { content: [{ type: "text", text: outputs.join("\n") }], details: { parallelBuffers } };
+		},
+	});
+
+	// ── orch_smart_friend ──
 	pi.registerTool({
 		name: ORCH_TOOL_NAMES.smartFriend,
 		label: "Orch Smart Friend",
@@ -206,6 +345,7 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 					cwd: ctx.cwd,
 					configState: state.configState,
 					modelRegistry: ctx.modelRegistry,
+					thinkingLevel: "xhigh",
 					signal,
 				});
 
@@ -251,18 +391,43 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 			"# Orch Interactive Mode",
 			"You are the main Pi agent and Orch's default interactive orchestrator.",
 			"Stay conversational and keep the user in the loop.",
-			"You decide whether to answer directly, do a little direct work, make a short plan, or delegate focused work to Orch sub-agents.",
 			"For multi-step tasks, use TodoWrite to keep a short live checklist and maintain statuses as work progresses.",
-			"Use delegation when it is likely to save main-context tokens or wall-clock time; otherwise work directly in the main Pi agent.",
-			"Use orch_delegate role=plan_codebase for broad repository/codebase reading, architecture discovery, multi-file inspection, or unfamiliar project analysis.",
-			"Use orch_delegate role=plan_researcher for documentation research only when local knowledge or quick direct reads are not enough.",
-			"Use tinyfish for current web search, online source lookup, live website extraction, scraping, and source-backed web research.",
-			"Use main-session built-in tools for simple inspection or straightforward edits when that is the fastest path.",
-			`Use ${ORCH_TOOL_NAMES.delegate} role=worker for focused implementation and role=validator for separate review only when risk or uncertainty justifies it.`,
-			`Use ${ORCH_TOOL_NAMES.smartFriend} when you are genuinely stuck and need a read-only advisor to inspect the repo independently; it may reuse cached Orch context.`,
+			"",
+			"## MANDATORY DELEGATION RULES",
+			"",
+			"You MUST delegate non-trivial tasks to Orch sub-agents. The main context must stay lean — working directly bloats context, degrades future decisions, and wastes tokens.",
+			"",
+			"### When you MUST delegate:",
+			"- Any task that reads more than one file → orch_delegate role=plan_codebase",
+			"- Any task that writes or edits code → orch_delegate role=worker",
+			"- Any task that needs web, docs, or API research → orch_delegate role=research (or role=plan_researcher for planning-specific docs)",
+			"- Any task that needs independent review or validation → orch_delegate role=validator",
+			"- Any task where you are stuck or low-confidence → orch_smart_friend",
+			"- Multiple read-only intelligence tasks at once → orch_parallel with plan_codebase, plan_researcher, or research roles",
+			"",
+			"### When you MAY work directly:",
+			"- Answering a quick factual question from your existing knowledge",
+			"- Reading a single known file for immediate context (under ~50 lines)",
+			"- Making a trivial one-line fix that requires no research or multi-file understanding",
+			"",
+			"### NEVER:",
+			"- NEVER do broad codebase sweeps in the main context. Use orch_delegate role=plan_codebase instead.",
+			"- NEVER read multiple files in the main context when a sub-agent could do it. Delegate first.",
+			"- NEVER edit more than one file directly. If a task touches multiple files, delegate to a worker.",
+			"- NEVER do web research in the main context. Use orch_delegate role=research or tinyfish instead.",
+			"- NEVER skip delegation because the task 'seems small'. At long context, your judgment degrades — delegate anyway.",
+			"",
+			"### Delegation guidance:",
+			`Use ${ORCH_TOOL_NAMES.delegate} role=worker for focused implementation. Always delegate code changes to a worker unless it is a trivial one-liner.`,
+			`Use ${ORCH_TOOL_NAMES.delegate} role=validator for independent review after a worker completes.`,
+			`Use ${ORCH_TOOL_NAMES.delegate} role=plan_codebase for broad repository/codebase reading, architecture discovery, multi-file inspection, or unfamiliar project analysis.`,
+			`Use ${ORCH_TOOL_NAMES.delegate} role=plan_researcher for planning-specific documentation research. The researcher has first-class parallel_search and parallel_fetch tools.`,
+			`Use ${ORCH_TOOL_NAMES.delegate} role=research for general web, docs, current-info, Context7, Parallel, or TinyFish research.`,
+			"Use orch_parallel to run multiple read-only sub-agents concurrently — only plan_codebase, plan_researcher, and research roles. Writes require sequential orch_delegate.",
+			`Use ${ORCH_TOOL_NAMES.smartFriend} when you are genuinely stuck and need a read-only advisor.`,
 			"Do not spawn or request an orchestrator sub-agent for orchestration. The main Pi agent is already the orchestrator.",
 			"Do not silently switch into autonomous goal mode. Full autonomous execution only begins when the user explicitly invokes /orch goal.",
-			`Configured Orch sub-agent models: worker=${config.roles.worker.provider}/${config.roles.worker.model}, validator=${config.roles.validator.provider}/${config.roles.validator.model}, smart_friend=${config.roles.smart_friend.provider}/${config.roles.smart_friend.model}, plan_codebase=${config.roles.plan_codebase.provider}/${config.roles.plan_codebase.model}, plan_researcher=${config.roles.plan_researcher.provider}/${config.roles.plan_researcher.model}.`,
+			`Configured Orch sub-agent models: worker=${config.roles.worker.provider}/${config.roles.worker.model}, validator=${config.roles.validator.provider}/${config.roles.validator.model}, smart_friend=${config.roles.smart_friend.provider}/${config.roles.smart_friend.model}, research=${config.roles.research.provider}/${config.roles.research.model}, plan_codebase=${config.roles.plan_codebase.provider}/${config.roles.plan_codebase.model}, plan_researcher=${config.roles.plan_researcher.provider}/${config.roles.plan_researcher.model}.`,
 		].join("\n\n");
 
 		return {
@@ -282,6 +447,7 @@ function getInteractiveDelegationOptions(role: DelegateRoleName): {
 				toolNames: [...INTERACTIVE_CODEBASE_TOOLS],
 			};
 		case "plan_researcher":
+		case "research":
 			return {
 				toolNames: [...INTERACTIVE_RESEARCH_TOOLS],
 				bashCommandGuard: isInteractiveReadOnlyBashCommand,
@@ -307,10 +473,29 @@ function buildInteractiveDelegationPrompt(role: DelegateRoleName, task: string):
 			].join("\n");
 		case "plan_researcher":
 			return [
-				"Interactive delegation mode: perform documentation, framework, package, SDK, API, official-docs, or web research. This Orch role may reuse cached context, so re-check sources when precision matters.",
-				"Stay read-only. You may inspect repository docs, use tinyfish for web search/live website extraction, and use only safe read-only/fetch commands for external docs when needed.",
-				"Prefer official documentation and cite URLs when external lookup is available. If external lookup is unavailable or blocked, state that limitation clearly.",
+				"Interactive delegation mode: perform planning-specific documentation, framework, package, SDK, API, official-docs, or web research. This Orch role may reuse cached context, so re-check sources when precision matters.",
+				"Stay read-only. You may inspect repository docs, use Context7 via ctx7 library/docs for package documentation, use first-class parallel_search/parallel_fetch tools for web research, use tinyfish for live website extraction when needed, and use only safe read-only/fetch commands for external docs.",
+				"For Context7 lookups, run ctx7 library <name> <query> first, then ctx7 docs <libraryId> <query>. For web research, use the parallel_search and parallel_fetch tools — they are safer than bash parallel-cli and avoid shell pipe/redirection issues.",
+				"Avoid calling parallel-cli directly via bash. Use parallel_search and parallel_fetch instead. The bash guard blocks pipes and redirections.",
+				"Never include API keys, secrets, proprietary code, or personal data in Context7 or Parallel queries.",
+				"Prefer official documentation and cite URLs, Context7 library IDs, or Parallel result URLs when external lookup is available. If external lookup is unavailable or blocked, state that limitation clearly.",
 				"Return a concise markdown report with relevant documentation, API patterns, caveats, sources/limitations, and implementation implications.",
+				"",
+				"Task:",
+				task,
+			].join("\n");
+		case "research":
+			return [
+				"Interactive delegation mode: perform general-purpose research for web, docs, APIs, current information, source-backed facts, or live website extraction. This Orch role may reuse cached context, so re-check sources when precision matters.",
+				"Stay read-only. Use repository docs when relevant, Context7 for package/framework documentation, first-class parallel_search/parallel_fetch tools for web search and extraction, and TinyFish for live web extraction/browser-like lookup when useful.",
+				"For Context7 lookups, run ctx7 library <name> <query> first, then ctx7 docs <libraryId> <query>. For web research, use the parallel_search and parallel_fetch tools — they are safer than bash parallel-cli and avoid shell pipe/redirection issues.",
+				"Avoid calling parallel-cli directly via bash. Use parallel_search and parallel_fetch instead. The bash guard blocks pipes and redirections.",
+				"Prefer parallel_fetch over TinyFish for API docs, static documentation pages, and reference URLs — TinyFish can time out on heavy/js-heavy docs sites.",
+				"Cite source URLs from Parallel results in your report.",
+				"When using shell commands for research, do not wrap them with 2>/dev/null, || echo, or || true — run the command bare.",
+				"When tools are available, actually call them; do not merely print commands unless explicitly asked.",
+				"Never include API keys, secrets, proprietary code, private user data, or personal data in external queries.",
+				"Return a concise markdown report with findings, citations/sources, caveats, limitations, and recommended next steps.",
 				"",
 				"Task:",
 				task,
@@ -321,15 +506,29 @@ function buildInteractiveDelegationPrompt(role: DelegateRoleName, task: string):
 	}
 }
 
+function stripResearchShellWrappers(command: string): string {
+	// Strip trailing 2>/dev/null, 2>&1, 1>/dev/null and || echo / || true fallbacks
+	// that models frequently append to research commands.  These are harmless
+	// but the pipe/redirect chars would otherwise trigger the destructive guard.
+	let cleaned = command;
+	cleaned = cleaned.replace(/\s*2>(?:\/dev\/null|&1)\s*/g, " ");
+	cleaned = cleaned.replace(/\s*1>(?:\/dev\/null)\s*/g, " ");
+	cleaned = cleaned.replace(/\s*\|\|\s*(?:echo\s+["'][^"']*["']|true)\s*;?\s*$/i, "");
+	return cleaned.trim();
+}
+
 function isInteractiveReadOnlyBashCommand(command: string): boolean {
 	const trimmed = command.trim();
 	if (trimmed.length === 0) {
 		return false;
 	}
-	if (INTERACTIVE_DESTRUCTIVE_BASH_PATTERNS.some((pattern) => pattern.test(trimmed))) {
+	// Strip harmless shell wrappers before checking destructive patterns.
+	// Models commonly add 2>/dev/null, || echo, || true for research lookups.
+	const cleaned = stripResearchShellWrappers(trimmed);
+	if (INTERACTIVE_DESTRUCTIVE_BASH_PATTERNS.some((pattern) => pattern.test(cleaned))) {
 		return false;
 	}
-	return INTERACTIVE_SAFE_BASH_PATTERNS.some((pattern) => pattern.test(trimmed));
+	return INTERACTIVE_SAFE_BASH_PATTERNS.some((pattern) => pattern.test(cleaned));
 }
 
 function createDelegationBuffer(role: OrchRoleName, featureId: string): DelegationBuffer {
@@ -394,8 +593,26 @@ function applyDelegationStreamEvent(buffer: DelegationBuffer, event: OrchSubagen
 		return;
 	}
 
+	if (event.type === "tool_diff") {
+		buffer.events.push({
+			kind: "tool",
+			label: event.label,
+			detail: event.detail,
+			diff: event.diff,
+			diffFilePath: event.diffFilePath,
+		});
+		trimDelegationEvents(buffer.events);
+		return;
+	}
+
 	if (event.type === "tool_call") {
-		buffer.events.push({ kind: "tool", label: event.label, detail: event.detail });
+		buffer.events.push({
+			kind: "tool",
+			label: event.label,
+			detail: event.detail,
+			diff: event.diff,
+			diffFilePath: event.diffFilePath,
+		});
 		incrementDelegationToolCount(buffer, event.label);
 		trimDelegationEvents(buffer.events);
 	}
@@ -440,7 +657,7 @@ function trimDelegationEvents(events: DelegationEventKind[]): void {
 }
 
 function applyDelegationRunWarnings(buffer: DelegationBuffer, role: DelegateRoleName, toolCalls: number, elapsedMs: number): void {
-	if ((role !== "plan_codebase" && role !== "plan_researcher") || toolCalls > 0 || elapsedMs >= FAST_ZERO_TOOL_WARNING_MS) {
+	if ((role !== "plan_codebase" && role !== "plan_researcher" && role !== "research") || toolCalls > 0 || elapsedMs >= FAST_ZERO_TOOL_WARNING_MS) {
 		return;
 	}
 
@@ -448,6 +665,25 @@ function applyDelegationRunWarnings(buffer: DelegationBuffer, role: DelegateRole
 		title: "No inspection tools used",
 		details: `The ${role} delegation completed in ${formatElapsed(elapsedMs)} without tool calls. It may have relied on cached context; re-run or ask for explicit file reads if precision matters.`,
 	});
+}
+
+function applyDelegationOutputSourceWarnings(buffer: DelegationBuffer, emptyFinalText: boolean, outputSource: string): void {
+	if (!emptyFinalText) {
+		return;
+	}
+	if (outputSource === "recovery_text") {
+		buffer.finalWarnings.push({
+			title: "Recovered missing final response",
+			details: "The sub-agent completed its first turn without final assistant text. Orch asked once for a no-tool final report and is showing that recovered response.",
+		});
+		return;
+	}
+	if (outputSource === "tool_fallback") {
+		buffer.finalWarnings.push({
+			title: "Diagnostic fallback output",
+			details: "The sub-agent did not provide final assistant text even after recovery. Orch is showing observed tool activity instead of a real sub-agent conclusion.",
+		});
+	}
 }
 
 function applyDelegationFinalOutput(buffer: DelegationBuffer, role: OrchRoleName, output: string): void {
@@ -642,7 +878,15 @@ function cloneSmartFriendBuffer(buffer: SmartFriendBuffer): SmartFriendBuffer {
 function applySmartFriendFinalOutput(buffer: SmartFriendBuffer, output: string): void {
 	const parsed = parseJsonObject(output);
 	if (!parsed) {
-		throw new Error("Smart friend returned invalid JSON.");
+		// Graceful fallback: use raw text as assessment instead of throwing
+		buffer.assessment = output.trim().length > 0 ? output.trim() : "No structured guidance returned.";
+		buffer.recommendation = "";
+		buffer.specificGuidance = [];
+		buffer.filesToRead = [];
+		buffer.needsMoreContext = false;
+		buffer.followUpPrompt = undefined;
+		buffer.status = "done";
+		return;
 	}
 
 	buffer.assessment = asNonEmptyString(parsed.assessment) ?? "";

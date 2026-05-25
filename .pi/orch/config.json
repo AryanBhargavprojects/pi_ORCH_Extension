@@ -5,16 +5,20 @@
       "model": "gpt-5.5"
     },
     "worker": {
-      "provider": "openai-codex",
-      "model": "gpt-5.4"
+      "provider": "opencode-go",
+      "model": "deepseek-v4-pro"
     },
     "validator": {
-      "provider": "openai-codex",
-      "model": "gpt-5.4-mini"
+      "provider": "opencode-go",
+      "model": "glm-5.1"
     },
     "smart_friend": {
       "provider": "openai-codex",
       "model": "gpt-5.5"
+    },
+    "research": {
+      "provider": "opencode-go",
+      "model": "kimi-k2.5"
     }
   }
 }

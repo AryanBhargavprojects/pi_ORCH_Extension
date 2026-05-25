@@ -17,13 +17,15 @@ import {
 	writePlanArtifact,
 	type PlanStatePaths,
 } from "./plan-state.js";
-import { spawnOrchSubagent, type OrchSubagentStreamEvent } from "./role-runner.js";
+import { spawnOrchSubagent, type OrchSubagentResult, type OrchSubagentStreamEvent } from "./role-runner.js";
 import { setOrchStatus, type OrchActivePlan, type OrchRuntimeState } from "./runtime.js";
 import { formatErrorMessage, isAbortLikeError } from "./utils.js";
+import { TINYFISH_TOOL_NAME } from "./tinyfish.js";
+import { PARALLEL_SEARCH_TOOL_NAME, PARALLEL_FETCH_TOOL_NAME } from "./parallel-tools.js";
 
 const PLAN_STATUS_KEY = "orch-plan";
-const PLAN_RESEARCH_TOOLS = ["read", "bash", "grep", "find", "ls"];
-const PLAN_BASH_GUARD_REASON = "Plan Mode only allows read-only bash commands. Use read, grep, find, ls, or safe inspection commands.";
+const PLAN_RESEARCH_TOOLS = ["read", "bash", "grep", "find", "ls", TINYFISH_TOOL_NAME, PARALLEL_SEARCH_TOOL_NAME, PARALLEL_FETCH_TOOL_NAME];
+const PLAN_BASH_GUARD_REASON = "Plan Mode only allows read-only bash commands. Use read, grep, find, ls, ctx7, parallel_search, parallel_fetch, or safe inspection commands.";
 const PLAN_CLARIFICATION_FALLBACK_OPTIONS = [
 	"Use the existing project conventions",
 	"Choose the safest/minimal default",
@@ -464,7 +466,7 @@ async function runCodebaseAnalysis(
 		onStreamEvent: (event) => handlePlanSubagentStreamEvent(ctx, state, event, PLAN_AGENT_LABELS["researching-codebase"]),
 	});
 
-	return result.output;
+	return formatPlanSubagentOutput("Codebase Analysis", result);
 }
 
 async function runDocsResearch(
@@ -486,7 +488,11 @@ async function runDocsResearch(
 		"Existing codebase analysis (excerpt):",
 		analysisExcerpt,
 		"Use read-only tools to inspect any docs, README files, configuration, or comments in the repository.",
-		"If safe external documentation lookup is available in this environment, use it for official docs and cite URLs. If not, explicitly state that external web/MCP research was unavailable and rely on repository-local docs.",
+		"Use Context7 for package/framework documentation when relevant: run ctx7 library <name> <query> first, then ctx7 docs <libraryId> <query>.",
+		"Use first-class Parallel tools (parallel_search and parallel_fetch) for web research, source-backed search, and URL extraction. These are safer than bash parallel-cli because they avoid shell pipe/redirection issues.",
+		"Avoid calling parallel-cli directly via bash. Use parallel_search and parallel_fetch instead. The read-only bash guard may block pipes and redirections.",
+		"Never include API keys, secrets, proprietary code, or personal data in Context7 or Parallel queries.",
+		"If safe external documentation lookup is available in this environment, use it for official docs and cite URLs, Context7 library IDs, or Parallel result URLs. If not, explicitly state that external web/MCP/Parallel research was unavailable and rely on repository-local docs.",
 		"Never run commands that modify files, install packages, change git state, or alter the system.",
 		"Produce a markdown report with these sections:",
 		"## Relevant Documentation",
@@ -511,7 +517,7 @@ async function runDocsResearch(
 		onStreamEvent: (event) => handlePlanSubagentStreamEvent(ctx, state, event, PLAN_AGENT_LABELS["researching-docs"]),
 	});
 
-	return result.output;
+	return formatPlanSubagentOutput("Documentation Research", result);
 }
 
 async function runFeasibilityPass(
@@ -560,7 +566,7 @@ async function runFeasibilityPass(
 		onStreamEvent: (event) => handlePlanSubagentStreamEvent(ctx, state, event, PLAN_AGENT_LABELS["assessing-feasibility"]),
 	});
 
-	return result.output;
+	return formatPlanSubagentOutput("Feasibility Assessment", result);
 }
 
 async function runSynthesisPass(
@@ -614,7 +620,18 @@ async function runSynthesisPass(
 		onStreamEvent: (event) => handlePlanSubagentStreamEvent(ctx, state, event, PLAN_AGENT_LABELS.synthesizing),
 	});
 
-	return normalizeSynthesisResult(result.output);
+	const output = result.outputSource === "tool_fallback" ? formatPlanSubagentOutput("Plan Synthesis", result) : result.output;
+	return normalizeSynthesisResult(output);
+}
+
+function formatPlanSubagentOutput(title: string, result: OrchSubagentResult): string {
+	if (!result.emptyFinalText) {
+		return result.output;
+	}
+	const warning = result.outputSource === "recovery_text"
+		? "Orch recovered this output with a no-tool final-response prompt after the sub-agent returned no final text."
+		: "Orch generated this diagnostic fallback because the sub-agent returned no final text.";
+	return [`# ${title}`, "", `> ${warning}`, "", result.output].join("\n");
 }
 
 // ─── JSON normalization ─────────────────────────────────────────────
@@ -1126,6 +1143,8 @@ const PLAN_DESTRUCTIVE_BASH_PATTERNS = [
 	/\bfind\b.*\s-delete\b/i,
 	/(^|[^<])>(?!>)/,
 	/>>/,
+	/[;&|`]/,
+	/\$\(/,
 	/\bnpm\s+(install|uninstall|update|ci|link|publish)/i,
 	/\byarn\s+(add|remove|install|publish)/i,
 	/\bpnpm\s+(add|remove|install|publish)/i,
@@ -1148,6 +1167,9 @@ const PLAN_SAFE_BASH_PATTERNS = [
 	/^\s*pnpm\s+(list|view|info|why|audit|outdated)\b/i,
 	/^\s*node\s+--version\b/i,
 	/^\s*python\d*\s+--version\b/i,
+	/^\s*ctx7\s+(?:library|docs|whoami|--version|-V|--help)\b/i,
+	/^\s*npx\s+(?:(?:--yes|-y)\s+)?ctx7(?:@latest)?\s+(?:library|docs|whoami|--version|-V|--help)\b/i,
+	/^\s*parallel-cli\s+(?:auth|search|extract|fetch|research\s+(?:run|status|poll|processors)|findall\s+(?:run|status|poll|result)|skills\s+list|--version|--help)\b/i,
 	/^\s*curl\s+(-[fsSLI]+\s+)?https?:\/\//i,
 	/^\s*wget\s+-O\s*-\s+https?:\/\//i,
 ];
@@ -1157,10 +1179,24 @@ function isPlanSafeBashCommand(command: string): boolean {
 	if (trimmed.length === 0) {
 		return false;
 	}
-	if (PLAN_DESTRUCTIVE_BASH_PATTERNS.some((pattern) => pattern.test(trimmed))) {
+	// Strip harmless shell wrappers before checking destructive patterns.
+	// Models commonly add 2>/dev/null, 2>&1, 1>/dev/null, || echo, || true.
+	const cleaned = stripPlanShellWrappers(trimmed);
+	if (PLAN_DESTRUCTIVE_BASH_PATTERNS.some((pattern) => pattern.test(cleaned))) {
 		return false;
 	}
-	return PLAN_SAFE_BASH_PATTERNS.some((pattern) => pattern.test(trimmed));
+	return PLAN_SAFE_BASH_PATTERNS.some((pattern) => pattern.test(cleaned));
+}
+
+function stripPlanShellWrappers(command: string): string {
+	// Strip trailing 2>/dev/null, 2>&1, 1>/dev/null and || echo / || true fallbacks
+	// that models frequently append to research commands. These are harmless
+	// but the pipe/redirect chars would otherwise trigger the destructive guard.
+	let cleaned = command;
+	cleaned = cleaned.replace(/\s*2>(?:\/dev\/null|&1)\s*/g, " ");
+	cleaned = cleaned.replace(/\s*1>(?:\/dev\/null)\s*/g, " ");
+	cleaned = cleaned.replace(/\s*\|\|\s*(?:echo\s+["'][^"']*["']|true)\s*;?\s*$/i, "");
+	return cleaned.trim();
 }
 
 function checkAborted(signal?: AbortSignal): void {

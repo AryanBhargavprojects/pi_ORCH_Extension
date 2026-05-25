@@ -91,17 +91,17 @@ export function syncCmuxMissionStatus(state: OrchRuntimeState, text: string | un
 
 	const mission = state.activeMission;
 	const progress = getMissionProgress(state);
-	void setCmuxStatus(`mission: ${text}`, { icon: "hammer", color: "#ff9500" });
-	void setCmuxProgress(progress.value, progress.label ?? `Mission: ${text}`);
+	void setCmuxStatus(`goal: ${text}`, { icon: "hammer", color: "#ff9500" });
+	void setCmuxProgress(progress.value, progress.label ?? `Goal: ${text}`);
 	if (mission) {
-		void cmuxLog(`Mission ${mission.id}: ${text}`, "info");
+		void cmuxLog(`Goal ${mission.id}: ${text}`, "info");
 	}
 }
 
 export function completeCmuxMission(status: "completed" | "needs-attention" | "failed" | "interrupted", goal: string, body?: string): void {
 	const isSuccess = status === "completed";
 	const isFailure = status === "failed";
-	const title = isSuccess ? "Orch mission complete" : status === "interrupted" ? "Orch mission interrupted" : "Orch mission needs attention";
+	const title = isSuccess ? "Orch goal complete" : status === "interrupted" ? "Orch goal interrupted" : "Orch goal needs attention";
 	const level = isSuccess ? "success" : isFailure ? "error" : "warning";
 	void setCmuxProgress(1, title);
 	void setCmuxStatus(title, { icon: isSuccess ? "checkmark" : "exclamationmark.triangle", color: isSuccess ? "#34c759" : isFailure ? "#ff3b30" : "#ff9500" });
@@ -180,10 +180,10 @@ function getMissionProgress(state: OrchRuntimeState): { value: number; label?: s
 	const failed = features.filter((feature) => feature.status === "failed").length;
 	const active = features.find((feature) => feature.status === "in-progress");
 	const label = active
-		? `Mission: ${active.title}`
+		? `Goal: ${active.title}`
 		: failed > 0
-			? `Mission: ${done}/${features.length} done, ${failed} failed`
-			: `Mission: ${done}/${features.length} features done`;
+			? `Goal: ${done}/${features.length} done, ${failed} failed`
+			: `Goal: ${done}/${features.length} features done`;
 	return { value: Math.max(0.05, Math.min(0.98, done / features.length)), label };
 }
 

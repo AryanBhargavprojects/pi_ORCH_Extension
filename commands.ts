@@ -16,7 +16,7 @@ import {
 } from "./config.js";
 import { ORCH_COMMANDS, ORCH_EXTENSION_NAME } from "./constants.js";
 import { readMissionLiveStateFromFile } from "./mission-state.js";
-import { requestMissionTakeover, runOrchGoalCommand } from "./mission.js";
+import { cancelActiveMission, requestMissionTakeover, runOrchGoalCommand } from "./mission.js";
 import { formatRuntimeSummary, setOrchStatus, type OrchRuntimeState } from "./runtime.js";
 import { formatErrorMessage } from "./utils.js";
 
@@ -27,7 +27,7 @@ type CompletionItem = {
 
 export function registerOrchCommands(pi: ExtensionAPI, state: OrchRuntimeState): void {
 	pi.registerCommand(ORCH_COMMANDS.main, {
-		description: "Orch control center: goal, status, config, model, takeover, reload",
+		description: "Orch control center: goal, goal status, goal cancel, status, config, model, takeover, reload",
 		getArgumentCompletions: (prefix) => getOrchArgumentCompletions(prefix),
 		handler: async (args, ctx) => {
 			try {
@@ -86,7 +86,7 @@ async function handleOrchCommand(
 			showOutput(ctx, `${await buildRuntimeStatusText(state, ctx.cwd)}\n\n${buildOrchHelpText()}`);
 			return;
 		case "goal":
-			await runOrchGoalCommand(pi, rest, ctx, state);
+			await handleGoalCommand(pi, rest, ctx, state);
 			return;
 		case "status":
 			await refreshConfigState(ctx, state);
@@ -123,6 +123,38 @@ async function handleOrchCommand(
 		default:
 			await refreshConfigState(ctx, state);
 			showOutput(ctx, `Unknown /orch subcommand: ${token}\n\n${buildOrchHelpText()}`, "warning");
+			return;
+	}
+}
+
+async function handleGoalCommand(
+	pi: ExtensionAPI,
+	args: string,
+	ctx: ExtensionCommandContext,
+	state: OrchRuntimeState,
+): Promise<void> {
+	const { token } = consumeToken(args);
+
+	switch (token) {
+		case "status":
+			await refreshConfigState(ctx, state);
+			showOutput(ctx, await buildGoalStatusText(state));
+			return;
+		case "cancel": {
+			const cancelledGoal = cancelActiveMission(state);
+			if (!cancelledGoal) {
+				showOutput(ctx, "There is no running Orch goal to cancel.", "warning");
+				return;
+			}
+			showOutput(
+				ctx,
+				`Cancelling the active Orch goal: ${cancelledGoal}\nUse /orch goal status to monitor shutdown or /orch takeover if you want to continue interactively after it stops.`,
+				"warning",
+			);
+			return;
+		}
+		default:
+			await runOrchGoalCommand(pi, args, ctx, state);
 			return;
 	}
 }
@@ -252,7 +284,7 @@ async function buildRuntimeStatusText(state: OrchRuntimeState, cwd: string): Pro
 		const liveState = await readMissionLiveStateFromFile(stateFilePath);
 		return [
 			summary,
-			"liveMissionState:",
+			"liveGoalState:",
 			`phase: ${liveState.phase}`,
 			`currentMilestoneId: ${liveState.currentMilestoneId ?? "none"}`,
 			`currentFeatureId: ${liveState.currentFeatureId ?? "none"}`,
@@ -262,8 +294,48 @@ async function buildRuntimeStatusText(state: OrchRuntimeState, cwd: string): Pro
 			`stateUpdatedAt: ${liveState.lastUpdatedAt}`,
 		].join("\n");
 	} catch (error) {
-		return `${summary}\nmissionStateReadError: ${formatErrorMessage(error)}`;
+		return `${summary}\ngoalStateReadError: ${formatErrorMessage(error)}`;
 	}
+}
+
+async function buildGoalStatusText(state: OrchRuntimeState): Promise<string> {
+	const activeGoal = state.activeMission;
+	if (!activeGoal) {
+		return "No Orch goal is currently running.\nUse /orch goal <goal> to start one.";
+	}
+
+	const lines = [
+		"Orch goal status",
+		`goal: ${activeGoal.goal}`,
+		`phase: ${activeGoal.phase}`,
+		`cancelCommand: /orch goal cancel`,
+		`takeoverCommands: /orch takeover | /orch-takeover`,
+	];
+	if (activeGoal.stateDir) {
+		lines.push(`goalStateDir: ${activeGoal.stateDir}`);
+	}
+	if (activeGoal.stateFilePath) {
+		lines.push(`goalStateFile: ${activeGoal.stateFilePath}`);
+	}
+	if (!activeGoal.stateFilePath) {
+		return lines.join("\n");
+	}
+
+	try {
+		const liveState = await readMissionLiveStateFromFile(activeGoal.stateFilePath);
+		lines.push(
+			`currentMilestoneId: ${liveState.currentMilestoneId ?? "none"}`,
+			`currentFeatureId: ${liveState.currentFeatureId ?? "none"}`,
+			`currentAttempt: ${liveState.currentAttempt ?? "none"}`,
+			`featureProgress: ${liveState.completedFeatures}/${liveState.totalFeatures} done, ${liveState.failedFeatures} failed`,
+			`milestoneProgress: ${liveState.completedMilestones}/${liveState.totalMilestones} done, ${liveState.failedMilestones} failed`,
+			`stateUpdatedAt: ${liveState.lastUpdatedAt}`,
+		);
+	} catch (error) {
+		lines.push(`goalStateReadError: ${formatErrorMessage(error)}`);
+	}
+
+	return lines.join("\n");
 }
 
 function buildOrchHelpText(): string {
@@ -271,6 +343,8 @@ function buildOrchHelpText(): string {
 		"Usage:",
 		`  /${ORCH_COMMANDS.main}`,
 		`  /${ORCH_COMMANDS.main} ${ORCH_COMMANDS.goal} <goal>`,
+		`  /${ORCH_COMMANDS.main} ${ORCH_COMMANDS.goal} status`,
+		`  /${ORCH_COMMANDS.main} ${ORCH_COMMANDS.goal} cancel`,
 		`  /${ORCH_COMMANDS.main} status`,
 		`  /${ORCH_COMMANDS.main} config`,
 		`  /${ORCH_COMMANDS.main} config paths`,
@@ -356,7 +430,7 @@ function buildConfigPathsText(state: OrchRuntimeState): string {
 		`resolved.userProfileFile: ${resolvedPaths.userProfileFile}`,
 		`resolved.projectContextFile: ${resolvedPaths.projectContextFile}`,
 		`resolved.knowledgeBaseFile: ${resolvedPaths.knowledgeBaseFile}`,
-		`resolved.missionsDir: ${resolvedPaths.missionsDir}`,
+		`resolved.goalRunsDir: ${resolvedPaths.missionsDir}`,
 		`resolved.adaptationLogFile: ${resolvedPaths.adaptationLogFile}`,
 		`resolved.plansDir: ${resolvedPaths.plansDir}`,
 	].join("\n");
@@ -397,6 +471,13 @@ function getOrchArgumentCompletions(prefix: string): CompletionItem[] | null {
 
 	if (tokens.length === 1) {
 		return toCompletionItems(["goal", "status", "config", "takeover", "reload"], tokens[0]);
+	}
+
+	if (tokens[0] === "goal") {
+		if (tokens.length === 2) {
+			return toCompletionItems(["status", "cancel"], tokens[1]);
+		}
+		return null;
 	}
 
 	if (tokens[0] !== "config") {

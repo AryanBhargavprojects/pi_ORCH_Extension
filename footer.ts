@@ -1,4 +1,4 @@
-import { getSupportedThinkingLevels, type Model } from "@mariozechner/pi-ai";
+import type { Api, Model } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { type Component, truncateToWidth, type TUI, visibleWidth } from "@mariozechner/pi-tui";
 
@@ -199,7 +199,7 @@ function resolveMascotMood(ctx: ExtensionContext, state: OrchRuntimeState): Orch
 }
 
 function getDisplayedThinkingLevel(
-	model: Model<unknown> | undefined,
+	model: Model<Api> | undefined,
 	currentLevel: ReturnType<ExtensionAPI["getThinkingLevel"]>,
 ): ReturnType<ExtensionAPI["getThinkingLevel"]> | undefined {
 	const availableLevels = getAvailableThinkingLevels(model);
@@ -209,11 +209,11 @@ function getDisplayedThinkingLevel(
 	return availableLevels.includes(currentLevel) ? currentLevel : availableLevels[availableLevels.length - 1];
 }
 
-function getAvailableThinkingLevels(model: Model<unknown> | undefined): Array<ReturnType<ExtensionAPI["getThinkingLevel"]>> {
-	if (!model) {
+function getAvailableThinkingLevels(model: Model<Api> | undefined): Array<ReturnType<ExtensionAPI["getThinkingLevel"]>> {
+	if (!model?.reasoning) {
 		return ["off"];
 	}
-	return getSupportedThinkingLevels(model) as Array<ReturnType<ExtensionAPI["getThinkingLevel"]>>;
+	return ["off", "minimal", "low", "medium", "high", "xhigh"];
 }
 
 function getThinkingLevelColor(

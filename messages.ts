@@ -72,49 +72,94 @@ export function emitOrchEvent(
 }
 
 function renderWorkerChangesBlock(changes: string[], theme: ExtensionContext["ui"]["theme"]): string {
-	const lines = [
-		`${theme.fg("dim", GLYPHS.boxTopLeft)} ${theme.fg("accent", "Worker changes")}`,
-	];
+	const parsedChanges = changes.map(parseWorkerChange).filter((change) => change.path.length > 0);
+	const stats = countWorkerChanges(parsedChanges);
+	const summary = [
+		stats.added > 0 ? theme.fg("success", `+${stats.added}`) : undefined,
+		stats.modified > 0 ? theme.fg("accent", `~${stats.modified}`) : undefined,
+		stats.removed > 0 ? theme.fg("error", `-${stats.removed}`) : undefined,
+	]
+		.filter((value): value is string => value !== undefined)
+		.join(theme.fg("dim", " "));
+	const header = [theme.fg("accent", "Worker diff"), summary ? theme.fg("dim", `(${summary})`) : undefined]
+		.filter((value): value is string => value !== undefined)
+		.join(" ");
+	const lines = [`${theme.fg("dim", GLYPHS.boxTopLeft)} ${header}`];
 
-	for (const change of changes) {
-		const parsed = parseWorkerChange(change);
-		const marker = getWorkerChangeMarker(parsed.description);
+	for (const change of parsedChanges) {
+		const marker = getWorkerChangeMarker(change);
+		const description = change.description ? ` ${theme.fg("dim", "—")} ${theme.fg("toolOutput", change.description)}` : "";
 		lines.push(
 			[
 				theme.fg("dim", GLYPHS.boxVert),
 				"  ",
 				theme.fg(marker.color, marker.glyph),
 				" ",
-				theme.fg("muted", parsed.path),
-				parsed.description ? `  ${theme.fg("dim", parsed.description)}` : "",
+				theme.fg(marker.color, marker.label.padEnd(8)),
+				" ",
+				theme.fg("customMessageText", change.path),
+				description,
 			].join(""),
 		);
+	}
+
+	if (parsedChanges.length === 0) {
+		lines.push(`${theme.fg("dim", GLYPHS.boxVert)}  ${theme.fg("dim", "No file changes reported by worker.")}`);
 	}
 
 	lines.push(theme.fg("dim", GLYPHS.boxBottomLeft));
 	return lines.join("\n");
 }
 
-function parseWorkerChange(change: string): { path: string; description: string } {
+type WorkerChangeKind = "added" | "modified" | "removed";
+
+type ParsedWorkerChange = {
+	path: string;
+	description: string;
+	kind: WorkerChangeKind;
+};
+
+function parseWorkerChange(change: string): ParsedWorkerChange {
 	const separator = change.indexOf(":");
-	if (separator === -1) {
-		return { path: change.trim(), description: "" };
-	}
+	const path = separator === -1 ? change.trim() : change.slice(0, separator).trim();
+	const description = separator === -1 ? "" : change.slice(separator + 1).trim();
 	return {
-		path: change.slice(0, separator).trim(),
-		description: change.slice(separator + 1).trim(),
+		path,
+		description,
+		kind: classifyWorkerChange(path, description),
 	};
 }
 
-function getWorkerChangeMarker(description: string): { glyph: string; color: "success" | "error" | "accent" } {
-	const normalized = description.toLowerCase();
-	if (/\b(add|added|create|created|new)\b/.test(normalized)) {
-		return { glyph: GLYPHS.diffAdd, color: "success" };
+function classifyWorkerChange(path: string, description: string): WorkerChangeKind {
+	const normalized = `${path} ${description}`.toLowerCase();
+	if (/\b(remove|removed|delete|deleted|drop|dropped)\b/.test(normalized)) {
+		return "removed";
 	}
-	if (/\b(remove|removed|delete|deleted)\b/.test(normalized)) {
-		return { glyph: GLYPHS.diffRemove, color: "error" };
+	if (/\b(add|added|create|created|new|introduce|introduced)\b/.test(normalized)) {
+		return "added";
 	}
-	return { glyph: "~", color: "accent" };
+	return "modified";
+}
+
+function countWorkerChanges(changes: ParsedWorkerChange[]): Record<WorkerChangeKind, number> {
+	return changes.reduce<Record<WorkerChangeKind, number>>(
+		(counts, change) => {
+			counts[change.kind]++;
+			return counts;
+		},
+		{ added: 0, modified: 0, removed: 0 },
+	);
+}
+
+function getWorkerChangeMarker(change: ParsedWorkerChange): { glyph: string; label: string; color: "success" | "error" | "accent" } {
+	switch (change.kind) {
+		case "added":
+			return { glyph: GLYPHS.diffAdd, label: "added", color: "success" };
+		case "removed":
+			return { glyph: GLYPHS.diffRemove, label: "removed", color: "error" };
+		default:
+			return { glyph: "~", label: "changed", color: "accent" };
+	}
 }
 
 function getLevelColor(level: OrchEventLevel):
