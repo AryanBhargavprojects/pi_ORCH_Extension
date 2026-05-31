@@ -1,5 +1,6 @@
 import type { Api, Model } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import { DynamicBorder, getSelectListTheme, type ExtensionAPI, type ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import { Container, type SelectItem, SelectList, Text } from "@mariozechner/pi-tui";
 
 import {
 	isOrchConfigScope,
@@ -25,6 +26,7 @@ type OrchModelChoice = {
 	model: Model<Api>;
 	reference: string;
 	label: string;
+	description: string;
 };
 
 export function registerOrchModelCommand(pi: ExtensionAPI, state: OrchRuntimeState): void {
@@ -230,8 +232,47 @@ async function resolveModelChoice(
 
 	const currentReference = `${configState.merged.roles[role].provider}/${configState.merged.roles[role].model}`;
 	const title = `Select model for ${role} (${scope} scope, current ${currentReference})`;
-	const selected = await ctx.ui.select(title, choices.map((choice) => choice.label));
-	return choices.find((choice) => choice.label === selected);
+	return selectModelChoice(ctx, title, choices);
+}
+
+async function selectModelChoice(
+	ctx: ExtensionCommandContext,
+	title: string,
+	choices: OrchModelChoice[],
+): Promise<OrchModelChoice | undefined> {
+	const items: SelectItem[] = choices.map((choice) => ({
+		value: choice.reference,
+		label: choice.reference,
+		description: choice.description,
+	}));
+
+	const selectedReference = await ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => {
+		const container = new Container();
+		container.addChild(new DynamicBorder((text) => theme.fg("accent", text)));
+		container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
+		container.addChild(new Text(theme.fg("dim", `${choices.length} available models • ↑↓ navigate • PgUp/PgDn scroll • enter select • esc cancel`), 1, 0));
+
+		const maxVisible = Math.min(Math.max(6, Math.min(choices.length, 14)), choices.length);
+		const selectList = new SelectList(items, maxVisible, getSelectListTheme(), {
+			minPrimaryColumnWidth: 18,
+			maxPrimaryColumnWidth: 46,
+		});
+		selectList.onSelect = (item) => done(item.value);
+		selectList.onCancel = () => done(undefined);
+		container.addChild(selectList);
+		container.addChild(new DynamicBorder((text) => theme.fg("accent", text)));
+
+		return {
+			render: (width: number) => container.render(width),
+			invalidate: () => container.invalidate(),
+			handleInput: (data: string) => {
+				selectList.handleInput(data);
+				tui.requestRender();
+			},
+		};
+	});
+
+	return selectedReference ? choices.find((choice) => choice.reference === selectedReference) : undefined;
 }
 
 function buildModelChoices(
@@ -260,10 +301,12 @@ function buildModelChoices(
 			]
 				.filter((value): value is string => value !== undefined)
 				.join(", ");
+			const description = `${model.name}${markers.length > 0 ? ` [${markers}]` : ""}`;
 			return {
 				model,
 				reference,
-				label: `${reference} — ${model.name}${markers.length > 0 ? ` [${markers}]` : ""}`,
+				label: `${reference} — ${description}`,
+				description,
 			};
 		});
 }

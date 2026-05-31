@@ -2,3 +2,5 @@ node_modules/
 .npm/
 .DS_Store
 npm-debug.log*
+.pi/orch/streams/
+.pi/orch/cmux-runs/

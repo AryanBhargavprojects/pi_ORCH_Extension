@@ -3,7 +3,6 @@ import { basename } from "node:path";
 
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 
-import type { PlanPhase } from "./plan-types.js";
 import type { OrchRuntimeState, OrchTodoItem } from "./runtime.js";
 
 const CMUX_STATUS_KEY = "orch";
@@ -11,16 +10,6 @@ const CMUX_COMMAND_TIMEOUT_MS = 2500;
 const MAX_STATUS_TEXT = 96;
 const MAX_LABEL_TEXT = 120;
 const MAX_NOTIFICATION_BODY = 420;
-const PHASE_PROGRESS: Record<PlanPhase, number> = {
-	clarifying: 0.1,
-	"researching-codebase": 0.3,
-	"researching-docs": 0.5,
-	"assessing-feasibility": 0.7,
-	synthesizing: 0.9,
-	completed: 1,
-	cancelled: 1,
-	failed: 1,
-};
 
 let cmuxAvailable: boolean | undefined;
 let lastTodoCompletionSignature: string | undefined;
@@ -33,7 +22,7 @@ export function registerCmuxIntegration(pi: ExtensionAPI, state: OrchRuntimeStat
 	});
 
 	pi.on("agent_start", async (_event, ctx) => {
-		if (state.activeMission || state.activePlan) {
+		if (state.activeMission) {
 			return;
 		}
 		agentTurnActive = true;
@@ -43,7 +32,7 @@ export function registerCmuxIntegration(pi: ExtensionAPI, state: OrchRuntimeStat
 	});
 
 	pi.on("tool_execution_start", async (event) => {
-		if (!agentTurnActive || state.activeMission || state.activePlan) {
+		if (!agentTurnActive || state.activeMission) {
 			return;
 		}
 		void setCmuxStatus(`tool: ${event.toolName}`, { icon: "hammer", color: "#ff9500" });
@@ -51,7 +40,7 @@ export function registerCmuxIntegration(pi: ExtensionAPI, state: OrchRuntimeStat
 	});
 
 	pi.on("tool_execution_end", async (event) => {
-		if (!agentTurnActive || state.activeMission || state.activePlan) {
+		if (!agentTurnActive || state.activeMission) {
 			return;
 		}
 		if (event.isError) {
@@ -63,7 +52,7 @@ export function registerCmuxIntegration(pi: ExtensionAPI, state: OrchRuntimeStat
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
-		if (!agentTurnActive || state.activeMission || state.activePlan) {
+		if (!agentTurnActive || state.activeMission) {
 			return;
 		}
 		agentTurnActive = false;
@@ -105,32 +94,6 @@ export function completeCmuxMission(status: "completed" | "needs-attention" | "f
 	const level = isSuccess ? "success" : isFailure ? "error" : "warning";
 	void setCmuxProgress(1, title);
 	void setCmuxStatus(title, { icon: isSuccess ? "checkmark" : "exclamationmark.triangle", color: isSuccess ? "#34c759" : isFailure ? "#ff3b30" : "#ff9500" });
-	void cmuxLog(`${title}: ${goal}`, level);
-	void cmuxNotify(title, truncateText(body || goal, MAX_NOTIFICATION_BODY));
-	setTimeout(() => {
-		void clearCmuxProgress();
-		void setCmuxStatus("ready", { icon: "sparkles", color: "#8e8eff" });
-	}, 1800).unref?.();
-}
-
-export function syncCmuxPlanStatus(state: OrchRuntimeState, text: string | undefined): void {
-	if (!text) {
-		return;
-	}
-
-	const phase = state.activePlan?.phase;
-	const progress = phase ? PHASE_PROGRESS[phase] ?? 0.2 : 0.2;
-	const label = state.activePlan?.lastActivity || `Plan: ${text}`;
-	void setCmuxStatus(`plan: ${text}`, { icon: "clock", color: "#0a84ff" });
-	void setCmuxProgress(progress, label);
-	void cmuxLog(`Plan: ${text}`, "info");
-}
-
-export function completeCmuxPlan(status: "completed" | "cancelled" | "failed", goal: string, body?: string): void {
-	const title = status === "completed" ? "Orch plan complete" : status === "cancelled" ? "Orch plan cancelled" : "Orch plan failed";
-	const level = status === "completed" ? "success" : status === "failed" ? "error" : "warning";
-	void setCmuxProgress(1, title);
-	void setCmuxStatus(title, { icon: status === "completed" ? "checkmark" : "xmark", color: status === "completed" ? "#34c759" : status === "failed" ? "#ff3b30" : "#ff9500" });
 	void cmuxLog(`${title}: ${goal}`, level);
 	void cmuxNotify(title, truncateText(body || goal, MAX_NOTIFICATION_BODY));
 	setTimeout(() => {

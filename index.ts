@@ -7,7 +7,6 @@ import { registerOrchFooter } from "./footer.js";
 import { registerImagePasteAttachments } from "./image-paste.js";
 import { registerInteractiveOrch } from "./interactive.js";
 import { registerGoalCommand } from "./mission.js";
-import { registerPlanCommand } from "./plan.js";
 import { registerOrchMessageRenderer } from "./messages.js";
 import { registerOrchModelCommand } from "./model-command.js";
 import { clearOrchStatus, createRuntimeState, markSessionStart, resetRuntimeTodos, setOrchStatus } from "./runtime.js";
@@ -26,7 +25,7 @@ export default function orchExtension(pi: ExtensionAPI): void {
 	registerParallelTools(pi);
 	registerCmuxIntegration(pi, runtimeState);
 	registerOrchMessageRenderer(pi);
-	registerOrchLoadingIndicator(pi);
+	registerOrchLoadingIndicator(pi, runtimeState);
 	registerCompactToolRenderers(pi);
 	registerTodoWriteTool(pi, runtimeState);
 	registerOrchCommands(pi, runtimeState);
@@ -34,7 +33,6 @@ export default function orchExtension(pi: ExtensionAPI): void {
 	registerOrchModelCommand(pi, runtimeState);
 	registerImagePasteAttachments(pi);
 	registerGoalCommand(pi, runtimeState);
-	registerPlanCommand(pi, runtimeState);
 	registerInteractiveOrch(pi, runtimeState);
 
 	pi.on("session_start", async (event, ctx) => {
@@ -56,12 +54,6 @@ export default function orchExtension(pi: ExtensionAPI): void {
 		if (runtimeState.activeMission && !runtimeState.activeMission.abortController.signal.aborted) {
 			runtimeState.activeMission.abortController.abort();
 		}
-		if (runtimeState.activePlan && !runtimeState.activePlan.abortController.signal.aborted) {
-			runtimeState.activePlan.abortController.abort();
-		}
-		if (runtimeState.activePlan) {
-			runtimeState.activePlan = undefined;
-		}
 		resetRuntimeTodos(runtimeState);
 		await disposeOrchSubagentSessions();
 		clearOrchStatus(ctx);
@@ -72,7 +64,6 @@ export default function orchExtension(pi: ExtensionAPI): void {
 			ctx.ui.setWidget(ORCH_WIDGET_IDS.missionBlock, undefined);
 			ctx.ui.setWidget(ORCH_WIDGET_IDS.missionThinking, undefined);
 			ctx.ui.setWidget(ORCH_WIDGET_IDS.missionProgress, undefined);
-			ctx.ui.setWidget(ORCH_WIDGET_IDS.planProgress, undefined);
 		}
 	});
 }

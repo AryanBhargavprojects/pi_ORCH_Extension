@@ -1,8 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { Text } from "@mariozechner/pi-tui";
+import { type Component, Text, truncateToWidth, type TUI, visibleWidth } from "@mariozechner/pi-tui";
 
-import { ORCH_TOOL_NAMES, ORCH_WIDGET_IDS } from "./constants.js";
+import { GLYPHS, ORCH_TOOL_NAMES, ORCH_WIDGET_IDS } from "./constants.js";
 import { syncCmuxTodos } from "./cmux-integration.js";
 import {
 	setOrchStatus,
@@ -80,9 +80,23 @@ export function updateTodoUi(ctx: ExtensionContext, todos: OrchTodoItem[]): void
 	ctx.ui.setStatus("orch-todos", undefined);
 	ctx.ui.setWidget(
 		ORCH_WIDGET_IDS.todos,
-		(_tui, theme) => new Text(formatTodoWidget(theme, todos), 0, 0),
+		(_tui, theme) => new OrchTodoComponent(theme, todos),
 		{ placement: "aboveEditor" },
 	);
+}
+
+class OrchTodoComponent implements Component {
+	constructor(
+		private readonly theme: ExtensionContext["ui"]["theme"],
+		private readonly todos: OrchTodoItem[],
+	) {}
+
+	render(width: number): string[] {
+		return formatTodoWidget(this.theme, this.todos, width);
+	}
+
+	invalidate(): void {}
+	dispose(): void {}
 }
 
 function areTodosComplete(todos: OrchTodoItem[]): boolean {
@@ -96,23 +110,44 @@ function summarizeTodos(todos: OrchTodoItem[]): string {
 	return `Todos ${completed}/${todos.length} completed • ${inProgress} in progress • ${pending} pending`;
 }
 
-function formatTodoWidget(theme: ExtensionContext["ui"]["theme"], todos: OrchTodoItem[]): string {
-	const lines = [
-		theme.fg("accent", "Orch Todos"),
-		theme.fg("dim", summarizeTodos(todos)),
-		...todos.map((todo) => `${formatTodoBullet(theme, todo.status)} ${todo.content}`),
-	];
-	return lines.join("\n");
+function formatTodoWidget(theme: ExtensionContext["ui"]["theme"], todos: OrchTodoItem[], width: number): string[] {
+	const lines: string[] = [];
+	const summary = summarizeTodos(todos);
+
+	lines.push(formatTodoLine(theme, width, GLYPHS.boxTopLeft, ` ${theme.fg("accent", "Orch Todos")} ${theme.fg("dim", `· ${summary}`)}`));
+
+	for (const todo of todos) {
+		const bullet = formatTodoBullet(theme, todo.status);
+		const contentColor = todo.status === "completed" ? "dim" : todo.status === "in_progress" ? "accent" : "muted";
+		const contentText = todo.status === "in_progress"
+			? theme.fg("accent", todo.content)
+			: theme.fg(contentColor, todo.content);
+		lines.push(formatTodoLine(theme, width, GLYPHS.boxVert, `   ${bullet} ${contentText}`));
+	}
+
+	lines.push(formatTodoLine(theme, width, GLYPHS.boxBottomLeft, ""));
+	return lines;
+}
+
+function formatTodoLine(theme: ExtensionContext["ui"]["theme"], width: number, leftGlyph: string, body: string): string {
+	const styledGlyph = theme.fg("dim", leftGlyph);
+	if (width <= visibleWidth(styledGlyph)) {
+		return truncateToWidth(styledGlyph, width, "");
+	}
+	const prefix = `${styledGlyph} `;
+	const contentWidth = Math.max(0, width - visibleWidth(prefix));
+	const content = truncateToWidth(body, contentWidth, theme.fg("dim", GLYPHS.ellipsis));
+	return truncateToWidth(`${prefix}${content}`, width, theme.fg("dim", GLYPHS.ellipsis));
 }
 
 function formatTodoBullet(theme: ExtensionContext["ui"]["theme"], status: OrchTodoStatus): string {
 	switch (status) {
 		case "completed":
-			return theme.fg("success", "[x]");
+			return theme.fg("success", GLYPHS.pass);
 		case "in_progress":
-			return theme.fg("accent", "[~]");
+			return theme.fg("accent", GLYPHS.inProgress);
 		case "pending":
-			return theme.fg("dim", "[ ]");
+			return theme.fg("dim", GLYPHS.pending);
 		default:
 			return TODO_STATUS_LABELS[status];
 	}

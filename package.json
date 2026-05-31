@@ -1,6 +1,6 @@
 {
   "name": "pi-orch-extension",
-  "version": "0.4.1",
+  "version": "1.0.0",
   "type": "module",
   "description": "Orch multi-agent orchestration extension for Pi",
   "keywords": [

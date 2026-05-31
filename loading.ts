@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { type Component, truncateToWidth, type TUI } from "@mariozechner/pi-tui";
 
 import { GLYPHS, ORCH_WIDGET_IDS } from "./constants.js";
+import type { OrchRuntimeState } from "./runtime.js";
 
 export const LOADING_VERBS: Array<[string, string]> = [
 	["Brewing", "Brewed"],
@@ -103,7 +104,7 @@ export function renderLoadingLine(elapsed: number, startVerbIndex: number, theme
 	].join("");
 }
 
-export function registerOrchLoadingIndicator(pi: ExtensionAPI): void {
+export function registerOrchLoadingIndicator(pi: ExtensionAPI, state: OrchRuntimeState): void {
 	pi.on("turn_start", async (_event, ctx) => {
 		if (!ctx.hasUI) {
 			return;
@@ -113,7 +114,7 @@ export function registerOrchLoadingIndicator(pi: ExtensionAPI): void {
 		const startVerbIndex = Math.floor(Math.random() * LOADING_VERBS.length);
 		ctx.ui.setWidget(
 			ORCH_WIDGET_IDS.loadingIndicator,
-			(tui, theme) => new OrchLoadingComponent(tui, theme, startedAt, startVerbIndex),
+			(tui, theme) => new OrchLoadingComponent(tui, theme, startedAt, startVerbIndex, state),
 		);
 	});
 
@@ -140,6 +141,7 @@ class OrchLoadingComponent implements Component {
 		private readonly theme: LoadingTheme,
 		private readonly startedAt: number,
 		private readonly startVerbIndex: number,
+		private readonly state: OrchRuntimeState,
 	) {
 		this.intervalId = setInterval(() => {
 			this.tui.requestRender();
@@ -147,9 +149,17 @@ class OrchLoadingComponent implements Component {
 	}
 
 	render(width: number): string[] {
+		// If a tool (like subagent delegation or smart friend advice) is executing,
+		// suppress this global loader to avoid duplicate spinners and visual noise.
+		if (this.state.footer.toolActive) {
+			return [];
+		}
+
 		const elapsed = Date.now() - this.startedAt;
 		const loadingLine = truncateToWidth(renderLoadingLine(elapsed, this.startVerbIndex, this.theme), width, this.theme.fg("dim", GLYPHS.ellipsis));
-		const hintLine = truncateToWidth(this.theme.fg("dim", "  esc to interrupt"), width, this.theme.fg("dim", GLYPHS.ellipsis));
+		const escTag = this.theme.fg("dim", "[") + this.theme.fg("accent", "Esc") + this.theme.fg("dim", "]");
+		const rawHint = `  ${escTag} ${this.theme.fg("dim", "to interrupt")}`;
+		const hintLine = truncateToWidth(rawHint, width, this.theme.fg("dim", GLYPHS.ellipsis));
 		return [loadingLine, hintLine];
 	}
 

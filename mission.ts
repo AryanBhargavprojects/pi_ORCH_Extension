@@ -521,6 +521,7 @@ async function runAutonomousMission(
 					`${feature.title} • attempt ${attempt}`,
 				);
 				const workerExecution = await runOrchWorkerSubagent({
+					label: `worker-${feature.id}-attempt-${attempt}`,
 					goal,
 					missionSummary: plan.summary,
 					feature,
@@ -568,6 +569,7 @@ async function runAutonomousMission(
 						`${feature.title} • attempt ${attempt}`,
 					);
 					const validationExecution = await runOrchValidatorSubagent({
+						label: `validator-${feature.id}-attempt-${attempt}`,
 						goal,
 						missionSummary: plan.summary,
 						feature,
@@ -725,6 +727,7 @@ async function runAutonomousMission(
 		writeCmuxRoleMarker(state.activeMission?.cmuxStreaming, "validator", `Milestone validation • ${milestone.title}`);
 		const milestoneValidationExecution = await spawnOrchSubagent({
 			role: "validator",
+			label: `milestone-validation-${milestone.id}`,
 			prompt: buildMilestoneValidationPrompt(
 				goal,
 				plan,
@@ -797,6 +800,7 @@ async function runAutonomousMission(
 		writeCmuxRoleMarker(state.activeMission?.cmuxStreaming, "validator", "Final goal validation");
 		const finalValidationExecution = await spawnOrchSubagent({
 			role: "validator",
+			label: "final-validation",
 			prompt: buildFinalValidationPrompt(goal, plan, featureRuns, milestoneRuns, finalValidationSharedState),
 			cwd: ctx.cwd,
 			configState,

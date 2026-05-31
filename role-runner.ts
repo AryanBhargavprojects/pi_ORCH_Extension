@@ -19,7 +19,7 @@ import {
 	type ToolDefinition,
 } from "@mariozechner/pi-coding-agent";
 
-import type { OrchLoadedConfig, OrchRoleName } from "./config.js";
+import { getOrchSubagentTimeoutsForRole, type OrchLoadedConfig, type OrchRoleName } from "./config.js";
 import { computeEditPreviewDiff, computeWritePreviewDiff, formatInlineDiffSummary } from "./diff.js";
 import type {
 	MissionFeature,
@@ -38,6 +38,12 @@ import {
 	PARALLEL_SEARCH_TOOL_NAME,
 	PARALLEL_FETCH_TOOL_NAME,
 } from "./parallel-tools.js";
+import {
+	createSubagentCmuxHandle,
+	writeSubagentCmuxEvent,
+	closeSubagentCmuxHandle,
+	type OrchSubagentCmuxHandle,
+} from "./cmux-visibility.js";
 
 export type OrchSubagentStreamEvent =
 	| {
@@ -90,6 +96,8 @@ export type OrchSubagentRequest = {
 	thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 	/** When true, bypass the per-role session cache and create a fresh session. Required for parallel dispatch. */
 	forceFresh?: boolean;
+	/** Optional human-readable label for CMUX visibility panes and logs. */
+	label?: string;
 };
 
 export type OrchSubagentResult = {
@@ -124,6 +132,7 @@ export type OrchWorkerSubagentRequest = {
 	modelRegistry: ModelRegistry;
 	signal?: AbortSignal;
 	onStreamEvent?: (event: OrchSubagentStreamEvent) => void;
+	label?: string;
 };
 
 export type OrchValidatorSubagentRequest = {
@@ -138,13 +147,13 @@ export type OrchValidatorSubagentRequest = {
 	modelRegistry: ModelRegistry;
 	signal?: AbortSignal;
 	onStreamEvent?: (event: OrchSubagentStreamEvent) => void;
+	label?: string;
 };
 
 const ORCHESTRATOR_TOOLS = ["read", "bash", "grep", "find", "ls"];
 const WORKER_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const VALIDATOR_TOOLS = ["read", "grep", "find", "ls"];
 const PLAN_CODEBASE_TOOLS = ["read", "grep", "find", "ls"];
-const PLAN_RESEARCHER_TOOLS = ["read", "bash", "grep", "find", "ls", TINYFISH_TOOL_NAME, PARALLEL_SEARCH_TOOL_NAME, PARALLEL_FETCH_TOOL_NAME];
 const RESEARCH_TOOLS = ["read", "bash", "grep", "find", "ls", TINYFISH_TOOL_NAME, PARALLEL_SEARCH_TOOL_NAME, PARALLEL_FETCH_TOOL_NAME];
 const SMART_FRIEND_TOOLS = ["read", "bash", "grep", "find", "ls"];
 const DEFAULT_SUBAGENT_BASH_TIMEOUT_SECONDS = 120;
@@ -171,16 +180,86 @@ type ToolExecuteParams<T extends { execute: (...args: never[]) => unknown }> = P
 
 const orchSubagentSessionCache = new Map<string, CachedOrchSubagentSession>();
 
+async function runPromptWithTimeout(
+	session: OrchSubagentSession,
+	prompt: string,
+	timeoutMs: number,
+	role: OrchRoleName,
+	phase: string,
+	options: { label?: string; signal?: AbortSignal } = {},
+): Promise<void> {
+	const agentLabel = options.label ? ` (${options.label})` : "";
+	if (options.signal?.aborted) {
+		void session.abort().catch(() => {});
+		throw new Error(`Orch ${role} sub-agent${agentLabel} aborted during ${phase}.`);
+	}
+
+	let timeoutId: ReturnType<typeof setTimeout> | undefined;
+	let abortHandler: (() => void) | undefined;
+	const timeoutReject = new Promise<never>((_resolve, reject) => {
+		timeoutId = setTimeout(() => {
+			void session.abort().catch(() => {});
+			reject(
+				new Error(
+					`Orch ${role} sub-agent${agentLabel} timed out after ${Math.round(timeoutMs / 1000)}s during ${phase}.`,
+				),
+			);
+		}, timeoutMs);
+	});
+	const abortReject = new Promise<never>((_resolve, reject) => {
+		if (!options.signal) {
+			return;
+		}
+		abortHandler = () => {
+			void session.abort().catch(() => {});
+			reject(new Error(`Orch ${role} sub-agent${agentLabel} aborted during ${phase}.`));
+		};
+		options.signal.addEventListener("abort", abortHandler, { once: true });
+	});
+
+	try {
+		await Promise.race([session.prompt(prompt), timeoutReject, abortReject]);
+	} finally {
+		if (timeoutId !== undefined) {
+			clearTimeout(timeoutId);
+		}
+		if (abortHandler && options.signal) {
+			options.signal.removeEventListener("abort", abortHandler);
+		}
+	}
+}
+
 export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<OrchSubagentResult> {
 	const startedAt = Date.now();
 	const modelConfig = request.configState.merged.roles[request.role];
 	const model = resolveConfiguredModel(request.modelRegistry, modelConfig.provider, modelConfig.model, request.role);
 	const { session, isCached, boundExtensions, cacheKey } = await getOrCreateOrchSubagentSession(request, model);
 
+	// Set up CMUX visibility pane/log before emitting stream events so early events are visible.
+	const cmuxLabel = request.label ?? `${request.role}-${Date.now()}`;
+	let cmuxHandle: OrchSubagentCmuxHandle | undefined;
+	try {
+		cmuxHandle = await createSubagentCmuxHandle(
+			request.cwd,
+			request.role,
+			cmuxLabel,
+			request.configState.merged.cmuxVisibility === "off" ? "off" : "status",
+		);
+	} catch {
+		cmuxHandle = undefined;
+	}
+
 	const toolArgsById = new Map<string, { toolName: string; args: unknown }>();
 	const toolEvents: OrchSubagentToolEvent[] = [];
 	let streamedText = "";
 	let toolCallCount = 0;
+	let cmuxCloseSummary = "finished";
+	const emitStreamEvent = (event: OrchSubagentStreamEvent) => {
+		request.onStreamEvent?.(event);
+		if (cmuxHandle) {
+			writeSubagentCmuxEvent(cmuxHandle, event);
+		}
+	};
 	const unsubscribe = session.subscribe((event) => {
 		if (event.type === "tool_execution_start") {
 			toolArgsById.set(event.toolCallId, { toolName: event.toolName, args: event.args });
@@ -198,7 +277,7 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 				...diffInfo,
 			};
 			toolEvents.push(toolEvent);
-			request.onStreamEvent?.({
+			emitStreamEvent({
 				role: request.role,
 				type: "tool_call",
 				...toolEvent,
@@ -211,7 +290,7 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 		}
 
 		if (event.assistantMessageEvent.type === "thinking_delta") {
-			request.onStreamEvent?.({
+			emitStreamEvent({
 				role: request.role,
 				type: "thinking_delta",
 				delta: event.assistantMessageEvent.delta,
@@ -221,7 +300,7 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 
 		if (event.assistantMessageEvent.type === "text_delta") {
 			streamedText += event.assistantMessageEvent.delta;
-			request.onStreamEvent?.({
+			emitStreamEvent({
 				role: request.role,
 				type: "text_delta",
 				delta: event.assistantMessageEvent.delta,
@@ -232,7 +311,8 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 	let wasAborted = false;
 	const abortHandler = () => {
 		wasAborted = true;
-		request.onStreamEvent?.({ role: request.role, type: "status", status: "aborted" });
+		cmuxCloseSummary = "aborted";
+		emitStreamEvent({ role: request.role, type: "status", status: "aborted" });
 		void session.abort().catch(() => {
 			// Ignore abort races.
 		});
@@ -247,7 +327,7 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 	}
 
 	try {
-		request.onStreamEvent?.({ role: request.role, type: "status", status: "starting" });
+		emitStreamEvent({ role: request.role, type: "status", status: "starting" });
 		if (!isCached || !boundExtensions) {
 			await session.bindExtensions({});
 			if (isCached && cacheKey) {
@@ -260,7 +340,11 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 
 		const runStartMessageCount = session.messages.length;
 		const prompt = appendFinalResponseInstruction(request.prompt);
-		await session.prompt(prompt);
+		const timeouts = getOrchSubagentTimeoutsForRole(request.configState.merged, request.role);
+		await runPromptWithTimeout(session, prompt, timeouts.promptMs, request.role, "primary prompt", {
+			label: cmuxLabel,
+			signal: request.signal,
+		});
 		if (wasAborted || request.signal?.aborted) {
 			throw new Error(`Orch ${request.role} sub-agent aborted.`);
 		}
@@ -286,7 +370,7 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 			}
 		}
 
-		request.onStreamEvent?.({ role: request.role, type: "status", status: "completed" });
+		emitStreamEvent({ role: request.role, type: "status", status: "completed" });
 		const assistantMessage = findLastAssistantMessage(runMessages);
 		const usage = {
 			input: assistantMessage?.usage?.input ?? 0,
@@ -316,6 +400,7 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 			elapsedMs: Date.now() - startedAt,
 		};
 	} catch (error) {
+		cmuxCloseSummary = error instanceof Error ? `failed: ${error.message}` : "failed";
 		if (isCached && cacheKey) {
 			await evictCachedOrchSubagentSession(cacheKey, session);
 		}
@@ -328,6 +413,7 @@ export async function spawnOrchSubagent(request: OrchSubagentRequest): Promise<O
 		if (!isCached) {
 			session.dispose();
 		}
+		await closeSubagentCmuxHandle(cmuxHandle, cmuxCloseSummary).catch(() => {});
 	}
 }
 
@@ -348,10 +434,14 @@ async function recoverMissingFinalText(
 	const recoveryStartMessageCount = session.messages.length;
 	const streamStartLength = getStreamedText().length;
 	const recoveryPrompt = buildMissingFinalTextRecoveryPrompt(request.role, toolEvents);
+	const timeouts = getOrchSubagentTimeoutsForRole(request.configState.merged, request.role);
 
 	session.setActiveToolsByName([]);
 	try {
-		await session.prompt(recoveryPrompt);
+		await runPromptWithTimeout(session, recoveryPrompt, timeouts.recoveryPromptMs, request.role, "missing-text recovery", {
+			label: request.label ?? request.role,
+			signal: request.signal,
+		});
 	} finally {
 		session.setActiveToolsByName(requestedTools);
 	}
@@ -361,7 +451,7 @@ async function recoverMissingFinalText(
 }
 
 function buildMissingFinalTextRecoveryPrompt(role: OrchRoleName, toolEvents: OrchSubagentToolEvent[]): string {
-	const isAnalysisRole = role === "plan_codebase" || role === "plan_researcher" || role === "research" || role === "smart_friend" || role === "plan_clarifier" || role === "plan_feasibility" || role === "plan_synthesizer";
+	const isAnalysisRole = role === "plan_codebase" || role === "research" || role === "smart_friend";
 	const urgency = isAnalysisRole
 		? "You must produce the complete final report now. Do not call tools. Just write the report directly in your final message based on the completed tool results you already have."
 		: "Now provide the final report for that previous task based only on the completed tool results and conversation context.";
@@ -395,6 +485,7 @@ function formatToolEventsForFallback(toolEvents: OrchSubagentToolEvent[]): strin
 export async function runOrchWorkerSubagent(request: OrchWorkerSubagentRequest): Promise<OrchSubagentResult> {
 	return spawnOrchSubagent({
 		role: "worker",
+		label: request.label ?? request.feature.title,
 		prompt: buildWorkerSubagentPrompt(request),
 		cwd: request.cwd,
 		configState: request.configState,
@@ -407,6 +498,7 @@ export async function runOrchWorkerSubagent(request: OrchWorkerSubagentRequest):
 export async function runOrchValidatorSubagent(request: OrchValidatorSubagentRequest): Promise<OrchSubagentResult> {
 	return spawnOrchSubagent({
 		role: "validator",
+		label: request.label ?? request.feature.title,
 		prompt: buildValidatorSubagentPrompt(request),
 		cwd: request.cwd,
 		configState: request.configState,
@@ -585,15 +677,8 @@ function getRoleTools(role: OrchRoleName): string[] {
 			return SMART_FRIEND_TOOLS;
 		case "research":
 			return RESEARCH_TOOLS;
-		case "plan_clarifier":
-			return ORCHESTRATOR_TOOLS;
 		case "plan_codebase":
 			return PLAN_CODEBASE_TOOLS;
-		case "plan_researcher":
-			return PLAN_RESEARCHER_TOOLS;
-		case "plan_feasibility":
-		case "plan_synthesizer":
-			return ORCHESTRATOR_TOOLS;
 	}
 }
 
@@ -877,7 +962,7 @@ function getRoleToolOverrides(request: OrchSubagentRequest): OrchRoleToolDefinit
 				const result = await writeTool.execute(toolCallId, params, signal, onUpdate, ctx);
 				return {
 					...result,
-					details: { ...((result.details as Record<string, unknown>) ?? {}), _diff: preview.ok === true ? preview.diff : undefined },
+					details: { ...((result.details as unknown as Record<string, unknown>) ?? {}), _diff: preview.ok === true ? preview.diff : undefined },
 				};
 			},
 		});

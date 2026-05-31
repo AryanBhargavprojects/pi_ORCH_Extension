@@ -21,15 +21,15 @@ type MascotPalette = {
 };
 
 const MASCOT_FRAMES: Record<OrchFooterMascotMood, string[]> = {
-	idle: [">_<", ">.<", ">_<", ">-<"],
-	thinking: [">~<", ">.~", ">~.", ">~<"],
-	tool: [">#<", ">$<", ">#<", ">$<"],
-	orchestrator: [">@<", ">@.", ".@<", ">@<"],
-	worker: [">><", ">>>", ">><", ">>>"],
-	validator: [">=<", ">|<", ">=<", ">|<"],
-	success: [">^<", ">*<", ">^<", ">*<"],
-	error: [">!<", ">x<", ">!<", ">x<"],
-	interrupted: [">?<", ">!?", "?!<", ">?<"],
+	idle: ["(◕‿◕)", "(◕.◕)", "(◕‿◕)", "(-‿-)"],
+	thinking: ["(•ิ_•ิ)", "(•ิ.•ิ)", "(•ิ_•ิ)", "(-_ -)"],
+	tool: ["(✧◡✧)", "(✦◡✦)", "(✧◡✧)", "(✦◡✦)"],
+	orchestrator: ["(๑•̀ㅂ•́)و", "(๑•̀.́•́)و", "(๑•̀ㅂ•́)و", "(๑•̀.́•́)و"],
+	worker: ["(っ•‿•)っ", "(っ•. •)っ", "(っ•‿•)っ", "(っ-‿-)っ"],
+	validator: ["(O_o)", "(o_O)", "(O_o)", "(o_O)"],
+	success: ["(✿◠‿◠)", "(✿^‿^)", "(✿◠‿◠)", "(✿*‿*)"],
+	error: ["(✖╭╮✖)", "(இ﹏இ)", "(✖╭╮✖)", "(இ﹏இ)"],
+	interrupted: ["(⊙_⊙)", "(⊙.⊙)", "(⊙_⊙)", "(⊙.⊙)"],
 };
 
 const MASCOT_PALETTES: Record<OrchFooterMascotMood, MascotPalette> = {
@@ -167,10 +167,6 @@ class OrchFooterComponent implements Component {
 }
 
 function resolveMascotMood(ctx: ExtensionContext, state: OrchRuntimeState): OrchFooterMascotMood {
-	if (state.activePlan) {
-		return "orchestrator";
-	}
-
 	const phase = state.activeMission?.phase.toLowerCase();
 	if (phase) {
 		if (phase.includes("validat")) {

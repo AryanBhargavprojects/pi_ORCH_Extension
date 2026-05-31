@@ -241,7 +241,7 @@ function registerWriteRenderer(pi: ExtensionAPI): void {
 			const result = await getBuiltInTools(ctx.cwd).write.execute(toolCallId, params, signal, onUpdate, ctx);
 			return {
 				...result,
-				details: { ...((result.details as Record<string, unknown>) ?? {}), _diff: preview.ok ? preview.diff : undefined },
+				details: { ...((result.details as unknown as Record<string, unknown>) ?? {}), _diff: preview.ok ? preview.diff : undefined },
 			};
 		},
 		renderCall(args, theme, context) {
@@ -849,7 +849,7 @@ function asDelegationBuffer(value: unknown): DelegationBuffer | undefined {
 	const status = record.status;
 	const role = record.role;
 	if (
-		(role !== "orchestrator" && role !== "worker" && role !== "validator" && role !== "smart_friend" && role !== "research" && role !== "plan_clarifier" && role !== "plan_codebase" && role !== "plan_researcher" && role !== "plan_feasibility" && role !== "plan_synthesizer") ||
+		(role !== "orchestrator" && role !== "worker" && role !== "validator" && role !== "smart_friend" && role !== "research" && role !== "plan_codebase") ||
 		(status !== "running" && status !== "done" && status !== "failed" && status !== "aborted") ||
 		!Array.isArray(record.events)
 	) {

@@ -9,21 +9,10 @@ export const ORCH_ROLE_NAMES = [
 	"validator",
 	"smart_friend",
 	"research",
-	"plan_clarifier",
 	"plan_codebase",
-	"plan_researcher",
-	"plan_feasibility",
-	"plan_synthesizer",
 ] as const;
 
 export type OrchRoleName = (typeof ORCH_ROLE_NAMES)[number];
-export const ORCH_PLAN_ROLE_NAMES = [
-	"plan_clarifier",
-	"plan_codebase",
-	"plan_researcher",
-	"plan_feasibility",
-	"plan_synthesizer",
-] as const satisfies readonly OrchRoleName[];
 export type OrchConfigScope = "user" | "project";
 export type OrchConfigValue = number | string;
 
@@ -35,6 +24,20 @@ export type OrchRoleModelConfig = {
 export type OrchTokenThresholds = {
 	learningExtraction: number;
 	contextWarning: number;
+};
+
+export type OrchCmuxVisibility = "off" | "status" | "panes" | "auto";
+
+export type OrchSubagentRoleTimeouts = {
+	/** Timeout for normal sub-agent prompt calls (ms). */
+	promptMs: number;
+	/** Timeout for missing-final-text recovery prompt (ms). */
+	recoveryPromptMs: number;
+};
+
+export type OrchSubagentTimeouts = OrchSubagentRoleTimeouts & {
+	/** Optional per-role overrides. Missing fields inherit the global subagentTimeouts values. */
+	roles: Partial<Record<OrchRoleName, Partial<OrchSubagentRoleTimeouts>>>;
 };
 
 export type OrchPathConfig = {
@@ -50,12 +53,16 @@ export type OrchConfig = {
 	roles: Record<OrchRoleName, OrchRoleModelConfig>;
 	tokenThresholds: OrchTokenThresholds;
 	paths: OrchPathConfig;
+	cmuxVisibility: OrchCmuxVisibility;
+	subagentTimeouts: OrchSubagentTimeouts;
 };
 
 export type OrchConfigOverrides = {
 	roles?: Partial<Record<OrchRoleName, Partial<OrchRoleModelConfig>>>;
 	tokenThresholds?: Partial<OrchTokenThresholds>;
 	paths?: Partial<OrchPathConfig>;
+	cmuxVisibility?: OrchCmuxVisibility;
+	subagentTimeouts?: Partial<OrchSubagentTimeouts>;
 };
 
 export type OrchConfigFileState = {
@@ -97,16 +104,8 @@ export const ORCH_CONFIG_KEYS = [
 	"roles.smart_friend.model",
 	"roles.research.provider",
 	"roles.research.model",
-	"roles.plan_clarifier.provider",
-	"roles.plan_clarifier.model",
 	"roles.plan_codebase.provider",
 	"roles.plan_codebase.model",
-	"roles.plan_researcher.provider",
-	"roles.plan_researcher.model",
-	"roles.plan_feasibility.provider",
-	"roles.plan_feasibility.model",
-	"roles.plan_synthesizer.provider",
-	"roles.plan_synthesizer.model",
 	"tokenThresholds.learningExtraction",
 	"tokenThresholds.contextWarning",
 	"paths.userProfileFile",
@@ -115,6 +114,14 @@ export const ORCH_CONFIG_KEYS = [
 	"paths.missionsDir",
 	"paths.adaptationLogFile",
 	"paths.plansDir",
+	"cmuxVisibility",
+	"subagentTimeouts.promptMs",
+	"subagentTimeouts.recoveryPromptMs",
+	"subagentTimeouts.roles.worker.promptMs",
+	"subagentTimeouts.roles.validator.promptMs",
+	"subagentTimeouts.roles.smart_friend.promptMs",
+	"subagentTimeouts.roles.research.promptMs",
+	"subagentTimeouts.roles.plan_codebase.promptMs",
 ] as const;
 
 export type OrchConfigKey = (typeof ORCH_CONFIG_KEYS)[number];
@@ -165,44 +172,12 @@ export const ORCH_CONFIG_KEY_INFO: Record<
 		description: "Model used by the Orch general research sub-agent",
 		valueType: "string",
 	},
-	"roles.plan_clarifier.provider": {
-		description: "Provider used by the Orch Plan Mode clarifier",
-		valueType: "string",
-	},
-	"roles.plan_clarifier.model": {
-		description: "Model used by the Orch Plan Mode clarifier",
-		valueType: "string",
-	},
 	"roles.plan_codebase.provider": {
-		description: "Provider used by the Orch Plan Mode codebase analyst",
+		description: "Provider used by the Orch read-only codebase analyst",
 		valueType: "string",
 	},
 	"roles.plan_codebase.model": {
-		description: "Model used by the Orch Plan Mode codebase analyst",
-		valueType: "string",
-	},
-	"roles.plan_researcher.provider": {
-		description: "Provider used by the Orch Plan Mode docs/web researcher",
-		valueType: "string",
-	},
-	"roles.plan_researcher.model": {
-		description: "Model used by the Orch Plan Mode docs/web researcher",
-		valueType: "string",
-	},
-	"roles.plan_feasibility.provider": {
-		description: "Provider used by the Orch Plan Mode feasibility reviewer",
-		valueType: "string",
-	},
-	"roles.plan_feasibility.model": {
-		description: "Model used by the Orch Plan Mode feasibility reviewer",
-		valueType: "string",
-	},
-	"roles.plan_synthesizer.provider": {
-		description: "Provider used by the Orch Plan Mode plan synthesizer",
-		valueType: "string",
-	},
-	"roles.plan_synthesizer.model": {
-		description: "Model used by the Orch Plan Mode plan synthesizer",
+		description: "Model used by the Orch read-only codebase analyst",
 		valueType: "string",
 	},
 	"tokenThresholds.learningExtraction": {
@@ -234,8 +209,40 @@ export const ORCH_CONFIG_KEY_INFO: Record<
 		valueType: "string",
 	},
 	"paths.plansDir": {
-		description: "Plan Mode working directory, relative to the project root unless absolute",
+		description: "Legacy plans directory (currently unused), relative to the project root unless absolute",
 		valueType: "string",
+	},
+	"cmuxVisibility": {
+		description: "CMUX visibility mode for sub-agent panes: off, status, panes, or auto",
+		valueType: "string",
+	},
+	"subagentTimeouts.promptMs": {
+		description: "Timeout in milliseconds for sub-agent prompt calls (default 300000 = 5 min)",
+		valueType: "number",
+	},
+	"subagentTimeouts.recoveryPromptMs": {
+		description: "Timeout in milliseconds for recovery prompt when sub-agent misses final text (default 120000 = 2 min)",
+		valueType: "number",
+	},
+	"subagentTimeouts.roles.worker.promptMs": {
+		description: "Worker role prompt timeout in milliseconds (default 600000 = 10 min)",
+		valueType: "number",
+	},
+	"subagentTimeouts.roles.validator.promptMs": {
+		description: "Validator role prompt timeout in milliseconds (default 600000 = 10 min)",
+		valueType: "number",
+	},
+	"subagentTimeouts.roles.smart_friend.promptMs": {
+		description: "Smart friend role prompt timeout in milliseconds (default 600000 = 10 min)",
+		valueType: "number",
+	},
+	"subagentTimeouts.roles.research.promptMs": {
+		description: "Research role prompt timeout in milliseconds (default 420000 = 7 min)",
+		valueType: "number",
+	},
+	"subagentTimeouts.roles.plan_codebase.promptMs": {
+		description: "Read-only codebase analyst prompt timeout in milliseconds (default 300000 = 5 min)",
+		valueType: "number",
 	},
 };
 
@@ -269,25 +276,9 @@ const DEFAULT_ORCH_CONFIG: OrchConfig = {
 			provider: "anthropic",
 			model: "claude-sonnet-4-5",
 		},
-		plan_clarifier: {
-			provider: "anthropic",
-			model: "claude-opus-4-5",
-		},
 		plan_codebase: {
 			provider: "anthropic",
 			model: "claude-sonnet-4-5",
-		},
-		plan_researcher: {
-			provider: "anthropic",
-			model: "claude-sonnet-4-5",
-		},
-		plan_feasibility: {
-			provider: "anthropic",
-			model: "claude-opus-4-5",
-		},
-		plan_synthesizer: {
-			provider: "anthropic",
-			model: "claude-opus-4-5",
 		},
 	},
 	tokenThresholds: {
@@ -302,10 +293,30 @@ const DEFAULT_ORCH_CONFIG: OrchConfig = {
 		adaptationLogFile: ".pi/orch/adaptation-log.jsonl",
 		plansDir: ".pi/orch/plans",
 	},
+	cmuxVisibility: "auto",
+	subagentTimeouts: {
+		promptMs: 300_000,
+		recoveryPromptMs: 120_000,
+		roles: {
+			worker: { promptMs: 600_000 },
+			validator: { promptMs: 600_000 },
+			smart_friend: { promptMs: 600_000 },
+			research: { promptMs: 420_000 },
+			plan_codebase: { promptMs: 300_000 },
+		},
+	},
 };
 
 export function createDefaultOrchConfig(): OrchConfig {
 	return structuredClone(DEFAULT_ORCH_CONFIG);
+}
+
+export function getOrchSubagentTimeoutsForRole(config: OrchConfig, role: OrchRoleName): OrchSubagentRoleTimeouts {
+	const roleTimeouts = config.subagentTimeouts.roles[role];
+	return {
+		promptMs: roleTimeouts?.promptMs ?? config.subagentTimeouts.promptMs,
+		recoveryPromptMs: roleTimeouts?.recoveryPromptMs ?? config.subagentTimeouts.recoveryPromptMs,
+	};
 }
 
 export function isOrchConfigScope(value: string): value is OrchConfigScope {
@@ -328,6 +339,11 @@ export function getEffectiveOrchConfigValue(config: OrchConfig, key: OrchConfigK
 	const roleKey = parseRoleConfigKey(key);
 	if (roleKey) {
 		return config.roles[roleKey.role][roleKey.field];
+	}
+	const timeoutKey = parseSubagentTimeoutConfigKey(key);
+	if (timeoutKey) {
+		const roleTimeouts = getOrchSubagentTimeoutsForRole(config, timeoutKey.role);
+		return roleTimeouts[timeoutKey.field];
 	}
 
 	switch (key) {
@@ -363,6 +379,12 @@ export function getEffectiveOrchConfigValue(config: OrchConfig, key: OrchConfigK
 			return config.paths.adaptationLogFile;
 		case "paths.plansDir":
 			return config.paths.plansDir;
+		case "cmuxVisibility":
+			return config.cmuxVisibility;
+		case "subagentTimeouts.promptMs":
+			return config.subagentTimeouts.promptMs;
+		case "subagentTimeouts.recoveryPromptMs":
+			return config.subagentTimeouts.recoveryPromptMs;
 		default:
 			throw new Error(`Unhandled Orch config key: ${key}`);
 	}
@@ -393,7 +415,6 @@ export async function loadOrchConfig(cwd: string): Promise<OrchLoadedConfig> {
 	let merged = createDefaultOrchConfig();
 	merged = applyOrchConfigOverrides(merged, user.overrides);
 	merged = applyOrchConfigOverrides(merged, project.overrides);
-	merged = applyPlanRoleModelFallbacks(merged, user.overrides, project.overrides);
 
 	const warnings = [...user.warnings, ...project.warnings];
 
@@ -644,6 +665,90 @@ function normalizeOrchConfigOverrides(
 		}
 	}
 
+	const cmuxVisibilityValue = value.cmuxVisibility;
+	if (cmuxVisibilityValue !== undefined) {
+		const cmuxVis = getStringValue(cmuxVisibilityValue, `${label}.cmuxVisibility`, warnings);
+		if (cmuxVis !== undefined) {
+			if (cmuxVis === "off" || cmuxVis === "status" || cmuxVis === "panes" || cmuxVis === "auto") {
+				overrides.cmuxVisibility = cmuxVis as OrchCmuxVisibility;
+			} else {
+				warnings.push(`${label}.cmuxVisibility must be one of "off", "status", "panes", or "auto".`);
+			}
+		}
+	}
+
+	const subagentTimeoutsValue = value.subagentTimeouts;
+	if (subagentTimeoutsValue !== undefined) {
+		if (!isRecord(subagentTimeoutsValue)) {
+			warnings.push(`${label}.subagentTimeouts must be an object.`);
+		} else {
+			const subagentTimeouts: Partial<OrchSubagentTimeouts> = {};
+			const promptMs = getPositiveNumberValue(
+				subagentTimeoutsValue.promptMs,
+				`${label}.subagentTimeouts.promptMs`,
+				warnings,
+			);
+			const recoveryPromptMs = getPositiveNumberValue(
+				subagentTimeoutsValue.recoveryPromptMs,
+				`${label}.subagentTimeouts.recoveryPromptMs`,
+				warnings,
+			);
+			if (promptMs !== undefined) {
+				subagentTimeouts.promptMs = promptMs;
+			}
+			if (recoveryPromptMs !== undefined) {
+				subagentTimeouts.recoveryPromptMs = recoveryPromptMs;
+			}
+
+			const roleTimeoutsValue = subagentTimeoutsValue.roles;
+			if (roleTimeoutsValue !== undefined) {
+				if (!isRecord(roleTimeoutsValue)) {
+					warnings.push(`${label}.subagentTimeouts.roles must be an object.`);
+				} else {
+					const roleTimeouts: Partial<Record<OrchRoleName, Partial<OrchSubagentRoleTimeouts>>> = {};
+					for (const [rawRole, rawRoleValue] of Object.entries(roleTimeoutsValue)) {
+						if (!ORCH_ROLE_NAMES.includes(rawRole as OrchRoleName)) {
+							warnings.push(`${label}.subagentTimeouts.roles.${rawRole} is not a known Orch role.`);
+							continue;
+						}
+						if (!isRecord(rawRoleValue)) {
+							warnings.push(`${label}.subagentTimeouts.roles.${rawRole} must be an object.`);
+							continue;
+						}
+						const role = rawRole as OrchRoleName;
+						const roleOverride: Partial<OrchSubagentRoleTimeouts> = {};
+						const rolePromptMs = getPositiveNumberValue(
+							rawRoleValue.promptMs,
+							`${label}.subagentTimeouts.roles.${rawRole}.promptMs`,
+							warnings,
+						);
+						const roleRecoveryPromptMs = getPositiveNumberValue(
+							rawRoleValue.recoveryPromptMs,
+							`${label}.subagentTimeouts.roles.${rawRole}.recoveryPromptMs`,
+							warnings,
+						);
+						if (rolePromptMs !== undefined) {
+							roleOverride.promptMs = rolePromptMs;
+						}
+						if (roleRecoveryPromptMs !== undefined) {
+							roleOverride.recoveryPromptMs = roleRecoveryPromptMs;
+						}
+						if (Object.keys(roleOverride).length > 0) {
+							roleTimeouts[role] = roleOverride;
+						}
+					}
+					if (Object.keys(roleTimeouts).length > 0) {
+						subagentTimeouts.roles = roleTimeouts;
+					}
+				}
+			}
+
+			if (Object.keys(subagentTimeouts).length > 0) {
+				overrides.subagentTimeouts = subagentTimeouts;
+			}
+		}
+	}
+
 	const pathsValue = value.paths;
 	if (pathsValue !== undefined) {
 		if (!isRecord(pathsValue)) {
@@ -701,26 +806,6 @@ function normalizeOrchConfigOverrides(
 	return { overrides, warnings };
 }
 
-function applyPlanRoleModelFallbacks(
-	base: OrchConfig,
-	userOverrides: OrchConfigOverrides,
-	projectOverrides: OrchConfigOverrides,
-): OrchConfig {
-	const next = structuredClone(base);
-	for (const role of ORCH_PLAN_ROLE_NAMES) {
-		if (hasRoleModelOverride(userOverrides, role) || hasRoleModelOverride(projectOverrides, role)) {
-			continue;
-		}
-		next.roles[role] = structuredClone(next.roles.orchestrator);
-	}
-	return next;
-}
-
-function hasRoleModelOverride(overrides: OrchConfigOverrides, role: OrchRoleName): boolean {
-	const roleOverride = overrides.roles?.[role];
-	return roleOverride?.provider !== undefined || roleOverride?.model !== undefined;
-}
-
 function applyOrchConfigOverrides(base: OrchConfig, overrides: OrchConfigOverrides): OrchConfig {
 	const next = structuredClone(base);
 
@@ -743,6 +828,30 @@ function applyOrchConfigOverrides(base: OrchConfig, overrides: OrchConfigOverrid
 
 	if (overrides.paths?.userProfileFile !== undefined) {
 		next.paths.userProfileFile = overrides.paths.userProfileFile;
+	}
+	if (overrides.cmuxVisibility !== undefined) {
+		next.cmuxVisibility = overrides.cmuxVisibility;
+	}
+	if (overrides.subagentTimeouts?.promptMs !== undefined) {
+		next.subagentTimeouts.promptMs = overrides.subagentTimeouts.promptMs;
+	}
+	if (overrides.subagentTimeouts?.recoveryPromptMs !== undefined) {
+		next.subagentTimeouts.recoveryPromptMs = overrides.subagentTimeouts.recoveryPromptMs;
+	}
+	if (overrides.subagentTimeouts?.roles !== undefined) {
+		for (const role of ORCH_ROLE_NAMES) {
+			const roleOverride = overrides.subagentTimeouts.roles[role];
+			if (!roleOverride) {
+				continue;
+			}
+			next.subagentTimeouts.roles[role] ??= {};
+			if (roleOverride.promptMs !== undefined) {
+				next.subagentTimeouts.roles[role].promptMs = roleOverride.promptMs;
+			}
+			if (roleOverride.recoveryPromptMs !== undefined) {
+				next.subagentTimeouts.roles[role].recoveryPromptMs = roleOverride.recoveryPromptMs;
+			}
+		}
 	}
 	for (const key of PROJECT_PATH_KEYS) {
 		const value = overrides.paths?.[key];
@@ -782,6 +891,14 @@ function setValueInOverrides(overrides: OrchConfigOverrides, key: OrchConfigKey,
 		overrides.roles ??= {};
 		const roleOverrides = (overrides.roles[roleKey.role] ??= {});
 		roleOverrides[roleKey.field] = value as string;
+		return;
+	}
+	const timeoutKey = parseSubagentTimeoutConfigKey(key);
+	if (timeoutKey) {
+		overrides.subagentTimeouts ??= {};
+		overrides.subagentTimeouts.roles ??= {};
+		const roleTimeouts = (overrides.subagentTimeouts.roles[timeoutKey.role] ??= {});
+		roleTimeouts[timeoutKey.field] = value as number;
 		return;
 	}
 
@@ -858,6 +975,17 @@ function setValueInOverrides(overrides: OrchConfigOverrides, key: OrchConfigKey,
 			overrides.paths ??= {};
 			overrides.paths.plansDir = value as string;
 			return;
+		case "cmuxVisibility":
+			overrides.cmuxVisibility = value as string as OrchCmuxVisibility;
+			return;
+		case "subagentTimeouts.promptMs":
+			overrides.subagentTimeouts ??= {};
+			overrides.subagentTimeouts.promptMs = value as number;
+			return;
+		case "subagentTimeouts.recoveryPromptMs":
+			overrides.subagentTimeouts ??= {};
+			overrides.subagentTimeouts.recoveryPromptMs = value as number;
+			return;
 	}
 }
 
@@ -871,6 +999,18 @@ function parseRoleConfigKey(key: string): { role: OrchRoleName; field: keyof Orc
 		return undefined;
 	}
 	return { role: role as OrchRoleName, field: match[2] as keyof OrchRoleModelConfig };
+}
+
+function parseSubagentTimeoutConfigKey(key: string): { role: OrchRoleName; field: keyof OrchSubagentRoleTimeouts } | undefined {
+	const match = key.match(/^subagentTimeouts\.roles\.([^.]+)\.(promptMs|recoveryPromptMs)$/);
+	if (!match) {
+		return undefined;
+	}
+	const role = match[1];
+	if (!ORCH_ROLE_NAMES.includes(role as OrchRoleName)) {
+		return undefined;
+	}
+	return { role: role as OrchRoleName, field: match[2] as keyof OrchSubagentRoleTimeouts };
 }
 
 async function writeConfigFile(path: string, value: OrchConfig | OrchConfigOverrides): Promise<void> {

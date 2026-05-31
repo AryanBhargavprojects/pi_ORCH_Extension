@@ -68,9 +68,6 @@ That lets you iterate in-place and reload with `/reload`.
 - `cmux-streaming.ts` - caller-anchored cmux worker/validator split-pane setup and raw role stream tailing
 - `interactive.ts` - default interactive orchestrator behavior plus `TodoWrite`, `orch_delegate`, and `orch_smart_friend`
 - Goal engine modules - autonomous `/orch goal` execution, deterministic planning/steering, milestones, conditional validation, live goal block UI, and goal state snapshots
-- `plan.ts` - Plan Mode workflow, `/plan` command, Ctrl+\` shortcut, plan progress UI
-- `plan-state.ts` - Plan Mode state directory I/O and artifact persistence
-- `plan-types.ts` - shared Plan Mode types
 - `tool-renderers.ts` - compact built-in tool rendering for subtler chat activity
 - `messages.ts` - Orch event message renderer/helpers
 - `prompt-loader.ts` - loads role prompts from the extension-local prompt folder
@@ -100,10 +97,6 @@ Primary entrypoints:
 - `/orch reload` - reload Pi so Orch changes are picked up immediately
 - `/orch-model [user|project] [role] [provider/model]` - select a Pi-available model for Orch sub-agents
 - `/orch goal <goal>` - start explicit autonomous goal mode
-- `/plan <goal>` - start Plan Mode (read-only analysis, no project edits)
-- `/plan status` - report active plan status
-- `/plan cancel` - abort active plan
-- Ctrl+\` - enter Plan Mode using editor text or prompt for goal
 
 Compatibility aliases:
 
@@ -149,15 +142,14 @@ Additional custom tools:
   - `worker`
   - `validator`
   - `plan_codebase`
-  - `plan_researcher`
   - `research`
 - `orch_smart_friend` - ask a read-only advisor for a second opinion when the orchestrator is stuck
 - `tinyfish` - run the TinyFish web automation/search agent for current web search, source lookup, live website extraction, and scraping
 
 cmux integration:
 
-- When Pi runs inside cmux, Orch mirrors task/goal/plan/todo progress to the cmux workspace sidebar using `cmux set-status`, `cmux set-progress`, and `cmux log`.
-- Orch sends native cmux notifications with `cmux notify` when interactive turns, goals, plans, or tracked todo lists complete.
+- When Pi runs inside cmux, Orch mirrors task/goal/todo progress to the cmux workspace sidebar using `cmux set-status`, `cmux set-progress`, and `cmux log`.
+- Orch sends native cmux notifications with `cmux notify` when interactive turns, goals, or tracked todo lists complete.
 - cmux calls are best-effort no-ops outside cmux and never block Orch work.
 
 This gives the main conversational agent a way to orchestrate directly, keep visible progress with todos, delegate focused sub-tasks using the role-specific models from Orch config, consult a stronger read-only advisor when needed, use cmux workspace status/notifications, and use TinyFish/Parallel/Context7-enabled research for web and docs lookup.
@@ -166,7 +158,7 @@ Validation is conditional during normal orchestration unless a stricter goal-sta
 
 ### TinyFish web search agent
 
-Orch registers a `tinyfish` custom tool for the main orchestrator and enables it for `plan_researcher` and `research` sub-agents. Use it with either:
+Orch registers a `tinyfish` custom tool for the main orchestrator and enables it for `research` sub-agents. Use it with either:
 
 - `query` for broad web search (defaults to DuckDuckGo HTML search results)
 - `url` + `goal` for a specific website extraction/automation task
@@ -188,16 +180,12 @@ Behavior:
   - `validator`
   - `smart_friend`
   - `research`
-  - `plan_clarifier`
   - `plan_codebase`
-  - `plan_researcher`
-  - `plan_feasibility`
-  - `plan_synthesizer`
 - lets the user choose which config scope to write to:
   - project scope
   - user scope
 - persists the selected provider/model pair into Orch config
-- the selected worker/validator/smart-friend/research/plan role models are used by Orch sub-agents during delegation, `/orch goal`, and `/plan` runs
+- the selected worker/validator/smart-friend/research/plan_codebase role models are used by Orch sub-agents during delegation and `/orch goal` runs
 
 Interactive flow:
 
@@ -316,41 +304,6 @@ Phase 4 behavior now implemented:
   - collapsed tool rows show concise summaries instead of dumping raw output by default
   - `ctrl+o` still expands the row to show the underlying detailed output or diff
 
-## Plan Mode
-
-`/plan <goal>` runs a read-only planning workflow that produces a structured plan without modifying the project. Plan sub-agents use read-only tools plus a bash allowlist for safe inspection commands. A live Plan Control block appears above the editor with phase, active sub-agent, elapsed time, latest activity, checklist, and artifact path.
-
-Workflow phases:
-
-1. **Clarifier** - refines the goal and asks clarification questions if needed
-2. **Codebase analysis** - inspects the repository with read-only tools
-3. **Docs/web research** - reviews repo docs and performs best-effort external docs/web lookup when available
-4. **Feasibility assessment** - evaluates technical risks and approach
-5. **Synthesis** - produces final `plan.md` and `validation-contract.md`
-
-Plan artifacts are written to `.pi/orch/plans/<plan-id>/`:
-
-- `brief.md` - original and refined goal with assumptions
-- `questions.json` - clarification questions and answers
-- `research/codebase-analysis.md` - codebase analysis report
-- `research/docs-web-research.md` - documentation research report
-- `feasibility.md` - feasibility assessment
-- `plan.md` - final implementation plan
-- `validation-contract.md` - acceptance criteria for validation
-- `state.json` - runtime plan state
-
-Shortcuts:
-
-- Ctrl+\` enters Plan Mode using editor text (or prompts for a goal if editor is empty)
-- `/plan status` shows active plan phase and state directory
-- `/plan cancel` aborts an active plan
-
-If an agent turn or goal is already running, the shortcut notifies instead of starting a second plan.
-
-After completion, Orch suggests running `/orch goal <refined goal>` to execute the plan autonomously.
-
-Plan Mode role models are configurable through `/orch-model` using `plan_clarifier`, `plan_codebase`, `plan_researcher`, `plan_feasibility`, and `plan_synthesizer`. If a plan role is not explicitly configured, it inherits the current merged `orchestrator` model so existing project configs keep working.
-
 ## Config files
 
 Orch merges config from two scopes:
@@ -376,11 +329,7 @@ Project config overrides user config.
     "validator": { "provider": "anthropic", "model": "claude-sonnet-4-5" },
     "smart_friend": { "provider": "anthropic", "model": "claude-opus-4-7" },
     "research": { "provider": "anthropic", "model": "claude-sonnet-4-5" },
-    "plan_clarifier": { "provider": "anthropic", "model": "claude-opus-4-5" },
-    "plan_codebase": { "provider": "anthropic", "model": "claude-sonnet-4-5" },
-    "plan_researcher": { "provider": "anthropic", "model": "claude-sonnet-4-5" },
-    "plan_feasibility": { "provider": "anthropic", "model": "claude-opus-4-5" },
-    "plan_synthesizer": { "provider": "anthropic", "model": "claude-opus-4-5" }
+    "plan_codebase": { "provider": "anthropic", "model": "claude-sonnet-4-5" }
   },
   "tokenThresholds": {
     "learningExtraction": 100000,
@@ -413,11 +362,7 @@ Files:
 - `prompts/validator.md`
 - `prompts/smart-friend.md`
 - `prompts/research.md`
-- `prompts/plan_clarifier.md`
 - `prompts/plan_codebase.md`
-- `prompts/plan_researcher.md`
-- `prompts/plan_feasibility.md`
-- `prompts/plan_synthesizer.md`
 
 The interactive orchestrator prompt and Orch sub-agent session behavior load from these files.
 

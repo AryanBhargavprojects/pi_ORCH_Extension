@@ -7,6 +7,7 @@ import { ORCH_TOOL_NAMES } from "./constants.js";
 import { formatElapsed, LOADING_VERBS, SPINNER_FRAME_MS, VERB_ROTATE_MS } from "./loading.js";
 import type { DelegationBuffer, DelegationEventKind } from "./mission-types.js";
 import { loadOrchRolePrompt } from "./prompt-loader.js";
+import { runVisiblePiSubagentInCmux } from "./cmux-pi-runner.js";
 import { spawnOrchSubagent, type OrchSubagentStreamEvent } from "./role-runner.js";
 import type { OrchRuntimeState } from "./runtime.js";
 import { TINYFISH_TOOL_NAME } from "./tinyfish.js";
@@ -21,10 +22,10 @@ import {
 	type SmartFriendBuffer,
 } from "./tool-renderers.js";
 
-const DELEGATE_ROLE_NAMES = ["worker", "validator", "plan_codebase", "plan_researcher", "research"] as const;
+const DELEGATE_ROLE_NAMES = ["worker", "validator", "plan_codebase", "research"] as const;
 type DelegateRoleName = (typeof DELEGATE_ROLE_NAMES)[number];
 
-const PARALLEL_ROLE_NAMES = ["plan_codebase", "plan_researcher", "research"] as const;
+const PARALLEL_ROLE_NAMES = ["plan_codebase", "research"] as const;
 type ParallelRoleName = (typeof PARALLEL_ROLE_NAMES)[number];
 
 const INTERACTIVE_CODEBASE_TOOLS = ["read", "grep", "find", "ls"] as const;
@@ -78,21 +79,20 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 	pi.registerTool({
 		name: ORCH_TOOL_NAMES.delegate,
 		label: "Orch Delegate",
-		description: "Run an Orch sub-agent with the configured worker, validator, codebase analyst, docs researcher, or general research model. Validator runs are always fresh; other roles may reuse cached context.",
+		description: "Run an Orch sub-agent with the configured worker, validator, read-only codebase analyst, or general research model. Validator runs are always fresh; other roles may reuse cached context.",
 		promptSnippet: "Delegate focused implementation, validation, codebase analysis, docs/API research, or general web research to an Orch role session. Validators are fresh; other roles may reuse context.",
 		promptGuidelines: [
 			"Use orch_delegate with role=worker for ANY code change — always delegate implementation unless it is a trivial one-liner.",
 			"Use orch_delegate with role=validator for independent review after a worker completes.",
 			"Use orch_delegate with role=plan_codebase for broad repository/codebase reading, architecture discovery, multi-file context gathering, or unfamiliar project analysis.",
-			"Use orch_delegate with role=plan_researcher for planning-specific documentation, framework, package, SDK, API, README, or external official-docs research. The researcher has first-class parallel_search and parallel_fetch tools — avoid bash parallel-cli.",
-			"Use orch_delegate with role=research for general-purpose web, docs, current-info, Context7, Parallel (first-class tools), or TinyFish research outside Plan Mode. The researcher has first-class parallel_search and parallel_fetch tools.",
+			"Use orch_delegate with role=research for documentation, framework, package, SDK, API, README, official-docs, current-info, Context7, Parallel, or TinyFish research. The researcher has first-class parallel_search and parallel_fetch tools — avoid bash parallel-cli.",
 			"Use main-session built-in tools ONLY for trivial tasks: a single short file read, a one-line fix, or a quick factual answer. Delegate everything else.",
-			"Do not delegate orchestration through orch_delegate; the main chat agent remains the orchestrator in interactive mode and decides whether to work directly, plan, or delegate.",
+			"Do not delegate orchestration through orch_delegate; the main chat agent remains the orchestrator in interactive mode and decides whether to work directly or delegate.",
 			"When delegating, include the relevant file paths, constraints, and expected output in the task itself. Validator runs start fresh; other roles may retain prior Orch sub-agent context.",
 		],
 		parameters: Type.Object({
 			role: StringEnum(DELEGATE_ROLE_NAMES, {
-				description: "Which Orch role to run: validator always gets a fresh context; worker, plan_codebase, plan_researcher, and research may reuse cached Orch context",
+				description: "Which Orch role to run: validator always gets a fresh context; worker, plan_codebase, and research may reuse cached Orch context",
 			}),
 			task: Type.String({ description: "Self-contained task for the selected Orch role" }),
 			featureId: Type.Optional(Type.String({ description: "Optional short feature/task id for the inline delegate header" })),
@@ -116,19 +116,32 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 			emitUpdate();
 
 			try {
-				const result = await spawnOrchSubagent({
+				const delegationPrompt = buildInteractiveDelegationPrompt(role, task);
+				const delegationOptions = getInteractiveDelegationOptions(role);
+				const onStreamEvent = (event: OrchSubagentStreamEvent) => {
+					applyDelegationStreamEvent(buffer, event);
+					updateDelegationTiming(buffer);
+					emitUpdate();
+				};
+				const result = await runVisiblePiSubagentInCmux({
 					role,
-					prompt: buildInteractiveDelegationPrompt(role, task),
+					label: buffer.featureId,
+					prompt: delegationPrompt,
+					cwd: ctx.cwd,
+					configState: state.configState,
+					signal,
+					toolNames: delegationOptions.toolNames,
+					onStreamEvent,
+				}) ?? await spawnOrchSubagent({
+					role,
+					label: buffer.featureId,
+					prompt: delegationPrompt,
 					cwd: ctx.cwd,
 					configState: state.configState,
 					modelRegistry: ctx.modelRegistry,
 					signal,
-					...getInteractiveDelegationOptions(role),
-					onStreamEvent: (event) => {
-						applyDelegationStreamEvent(buffer, event);
-						updateDelegationTiming(buffer);
-						emitUpdate();
-					},
+					...delegationOptions,
+					onStreamEvent,
 				});
 
 				applyDelegationFinalOutput(buffer, role, result.output);
@@ -186,11 +199,11 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 	pi.registerTool({
 		name: ORCH_TOOL_NAMES.parallel,
 		label: "Orch Parallel",
-		description: "Run multiple read-only Orch sub-agents in parallel for concurrent intelligence gathering. Only plan_codebase, plan_researcher, and research roles are supported — no mutations.",
-		promptSnippet: "Run multiple read-only Orch sub-agents concurrently for intelligence gathering. Only plan_codebase, plan_researcher, and research roles.",
+		description: "Run multiple read-only Orch sub-agents in parallel for concurrent intelligence gathering. Only plan_codebase and research roles are supported — no mutations.",
+		promptSnippet: "Run multiple read-only Orch sub-agents concurrently for intelligence gathering. Only plan_codebase and research roles.",
 		promptGuidelines: [
 			"Use orch_parallel to run multiple read-only sub-agents concurrently in a single call.",
-			"Only read-only roles are allowed: plan_codebase (code exploration), plan_researcher (docs/API research), research (general web/docs research).",
+			"Only read-only roles are allowed: plan_codebase (code exploration) and research (docs/web/API research).",
 			"Each task in the tasks array runs independently; they do not share state.",
 			"Worker and validator are NOT allowed in parallel — use sequential orch_delegate for implementation and review.",
 			"Keep each task self-contained with clear instructions and expected output.",
@@ -198,7 +211,7 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 		parameters: Type.Object({
 			tasks: Type.Array(Type.Object({
 				role: StringEnum(PARALLEL_ROLE_NAMES, {
-					description: "Read-only Orch role for this parallel task: plan_codebase (code exploration), plan_researcher (docs/API research), research (general web/docs research)",
+					description: "Read-only Orch role for this parallel task: plan_codebase (code exploration) or research (docs/web/API research)",
 				}),
 				task: Type.String({ description: "Self-contained task for this role" }),
 				featureId: Type.Optional(Type.String({ description: "Optional short label for this parallel task" })),
@@ -216,12 +229,13 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 			for (const task of tasks) {
 				if (task.role === "worker" || task.role === "validator") {
 					throw new Error(
-						`orch_parallel only accepts read-only roles (plan_codebase, plan_researcher, research). ` +
+						`orch_parallel only accepts read-only roles (plan_codebase, research). ` +
 						`Got role="${task.role}". Use orch_delegate for sequential worker/validator runs.`,
 					);
 				}
 			}
 
+			const layoutGroupId = `parallel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 			const settleResults = await Promise.allSettled(
 				tasks.map(async (task, index) => {
 					const buffer = createDelegationBuffer(task.role, task.featureId ?? deriveDelegationFeatureId(task.task));
@@ -232,19 +246,36 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 					}
 					const startedAt = Date.now();
 					try {
-						const result = await spawnOrchSubagent({
+						const delegationPrompt = buildInteractiveDelegationPrompt(task.role, task.task);
+						const delegationOptions = getInteractiveDelegationOptions(task.role);
+						const label = `${index}-${buffer.featureId}`;
+						const onStreamEvent = (event: OrchSubagentStreamEvent) => {
+							applyDelegationStreamEvent(buffer, event);
+							updateDelegationTiming(buffer);
+						};
+						const result = await runVisiblePiSubagentInCmux({
 							role: task.role,
-							prompt: buildInteractiveDelegationPrompt(task.role, task.task),
+							label,
+							prompt: delegationPrompt,
+							cwd: ctx.cwd,
+							configState: state.configState!,
+							signal,
+							toolNames: delegationOptions.toolNames,
+							onStreamEvent,
+							parallelIndex: index,
+							parallelTotal: tasks.length,
+							layoutGroupId,
+						}) ?? await spawnOrchSubagent({
+							role: task.role,
+							label,
+							prompt: delegationPrompt,
 							cwd: ctx.cwd,
 							configState: state.configState!,
 							modelRegistry: ctx.modelRegistry,
 							forceFresh: true,
 							signal,
-							...getInteractiveDelegationOptions(task.role),
-							onStreamEvent: (event) => {
-								applyDelegationStreamEvent(buffer, event);
-								updateDelegationTiming(buffer);
-							},
+							...delegationOptions,
+							onStreamEvent,
 						});
 						applyDelegationFinalOutput(buffer, task.role, result.output);
 						applyDelegationRunWarnings(buffer, task.role, result.toolCalls, result.elapsedMs);
@@ -339,9 +370,19 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 			emitUpdate();
 
 			try {
-				const result = await spawnOrchSubagent({
+				const smartFriendPrompt = buildSmartFriendPrompt(params.question, params.context, params.relevantFiles, state);
+				const result = await runVisiblePiSubagentInCmux({
 					role: "smart_friend",
-					prompt: buildSmartFriendPrompt(params.question, params.context, params.relevantFiles, state),
+					label: "smart-friend",
+					prompt: smartFriendPrompt,
+					cwd: ctx.cwd,
+					configState: state.configState,
+					thinkingLevel: "xhigh",
+					signal,
+				}) ?? await spawnOrchSubagent({
+					role: "smart_friend",
+					label: "smart-friend",
+					prompt: smartFriendPrompt,
 					cwd: ctx.cwd,
 					configState: state.configState,
 					modelRegistry: ctx.modelRegistry,
@@ -400,10 +441,10 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 			"### When you MUST delegate:",
 			"- Any task that reads more than one file → orch_delegate role=plan_codebase",
 			"- Any task that writes or edits code → orch_delegate role=worker",
-			"- Any task that needs web, docs, or API research → orch_delegate role=research (or role=plan_researcher for planning-specific docs)",
+			"- Any task that needs web, docs, or API research → orch_delegate role=research",
 			"- Any task that needs independent review or validation → orch_delegate role=validator",
 			"- Any task where you are stuck or low-confidence → orch_smart_friend",
-			"- Multiple read-only intelligence tasks at once → orch_parallel with plan_codebase, plan_researcher, or research roles",
+			"- Multiple read-only intelligence tasks at once → orch_parallel with plan_codebase or research roles",
 			"",
 			"### When you MAY work directly:",
 			"- Answering a quick factual question from your existing knowledge",
@@ -421,13 +462,12 @@ export function registerInteractiveOrch(pi: ExtensionAPI, state: OrchRuntimeStat
 			`Use ${ORCH_TOOL_NAMES.delegate} role=worker for focused implementation. Always delegate code changes to a worker unless it is a trivial one-liner.`,
 			`Use ${ORCH_TOOL_NAMES.delegate} role=validator for independent review after a worker completes.`,
 			`Use ${ORCH_TOOL_NAMES.delegate} role=plan_codebase for broad repository/codebase reading, architecture discovery, multi-file inspection, or unfamiliar project analysis.`,
-			`Use ${ORCH_TOOL_NAMES.delegate} role=plan_researcher for planning-specific documentation research. The researcher has first-class parallel_search and parallel_fetch tools.`,
-			`Use ${ORCH_TOOL_NAMES.delegate} role=research for general web, docs, current-info, Context7, Parallel, or TinyFish research.`,
-			"Use orch_parallel to run multiple read-only sub-agents concurrently — only plan_codebase, plan_researcher, and research roles. Writes require sequential orch_delegate.",
+			`Use ${ORCH_TOOL_NAMES.delegate} role=research for general web, docs, current-info, Context7, Parallel, TinyFish, and documentation research.`,
+			"Use orch_parallel to run multiple read-only sub-agents concurrently — only plan_codebase and research roles. Writes require sequential orch_delegate.",
 			`Use ${ORCH_TOOL_NAMES.smartFriend} when you are genuinely stuck and need a read-only advisor.`,
 			"Do not spawn or request an orchestrator sub-agent for orchestration. The main Pi agent is already the orchestrator.",
 			"Do not silently switch into autonomous goal mode. Full autonomous execution only begins when the user explicitly invokes /orch goal.",
-			`Configured Orch sub-agent models: worker=${config.roles.worker.provider}/${config.roles.worker.model}, validator=${config.roles.validator.provider}/${config.roles.validator.model}, smart_friend=${config.roles.smart_friend.provider}/${config.roles.smart_friend.model}, research=${config.roles.research.provider}/${config.roles.research.model}, plan_codebase=${config.roles.plan_codebase.provider}/${config.roles.plan_codebase.model}, plan_researcher=${config.roles.plan_researcher.provider}/${config.roles.plan_researcher.model}.`,
+			`Configured Orch sub-agent models: worker=${config.roles.worker.provider}/${config.roles.worker.model}, validator=${config.roles.validator.provider}/${config.roles.validator.model}, smart_friend=${config.roles.smart_friend.provider}/${config.roles.smart_friend.model}, research=${config.roles.research.provider}/${config.roles.research.model}, plan_codebase=${config.roles.plan_codebase.provider}/${config.roles.plan_codebase.model}.`,
 		].join("\n\n");
 
 		return {
@@ -446,7 +486,6 @@ function getInteractiveDelegationOptions(role: DelegateRoleName): {
 			return {
 				toolNames: [...INTERACTIVE_CODEBASE_TOOLS],
 			};
-		case "plan_researcher":
 		case "research":
 			return {
 				toolNames: [...INTERACTIVE_RESEARCH_TOOLS],
@@ -467,19 +506,6 @@ function buildInteractiveDelegationPrompt(role: DelegateRoleName, task: string):
 				"Stay read-only. Use read, grep, find, and ls only. Do not edit files or run shell commands.",
 				"Return a concise markdown report with relevant files/modules, current architecture, dependencies/integrations, impact areas, patterns to follow, and risks.",
 				"Keep findings evidence-backed and implementation-relevant.",
-				"",
-				"Task:",
-				task,
-			].join("\n");
-		case "plan_researcher":
-			return [
-				"Interactive delegation mode: perform planning-specific documentation, framework, package, SDK, API, official-docs, or web research. This Orch role may reuse cached context, so re-check sources when precision matters.",
-				"Stay read-only. You may inspect repository docs, use Context7 via ctx7 library/docs for package documentation, use first-class parallel_search/parallel_fetch tools for web research, use tinyfish for live website extraction when needed, and use only safe read-only/fetch commands for external docs.",
-				"For Context7 lookups, run ctx7 library <name> <query> first, then ctx7 docs <libraryId> <query>. For web research, use the parallel_search and parallel_fetch tools — they are safer than bash parallel-cli and avoid shell pipe/redirection issues.",
-				"Avoid calling parallel-cli directly via bash. Use parallel_search and parallel_fetch instead. The bash guard blocks pipes and redirections.",
-				"Never include API keys, secrets, proprietary code, or personal data in Context7 or Parallel queries.",
-				"Prefer official documentation and cite URLs, Context7 library IDs, or Parallel result URLs when external lookup is available. If external lookup is unavailable or blocked, state that limitation clearly.",
-				"Return a concise markdown report with relevant documentation, API patterns, caveats, sources/limitations, and implementation implications.",
 				"",
 				"Task:",
 				task,
@@ -657,7 +683,7 @@ function trimDelegationEvents(events: DelegationEventKind[]): void {
 }
 
 function applyDelegationRunWarnings(buffer: DelegationBuffer, role: DelegateRoleName, toolCalls: number, elapsedMs: number): void {
-	if ((role !== "plan_codebase" && role !== "plan_researcher" && role !== "research") || toolCalls > 0 || elapsedMs >= FAST_ZERO_TOOL_WARNING_MS) {
+	if ((role !== "plan_codebase" && role !== "research") || toolCalls > 0 || elapsedMs >= FAST_ZERO_TOOL_WARNING_MS) {
 		return;
 	}
 

@@ -5,7 +5,6 @@ export const ORCH_EXTENSION_VERSION = "0.4.0";
 export const ORCH_COMMANDS = {
 	main: "orch",
 	goal: "goal",
-	plan: "plan",
 	model: "orch-model",
 	status: "orch-status",
 	reload: "orch-reload",
@@ -49,6 +48,5 @@ export const ORCH_WIDGET_IDS = {
 	missionBlock: "orch-mission-block",
 	missionThinking: "orch-mission-thinking",
 	missionProgress: "orch-mission-progress",
-	planProgress: "orch-plan-progress",
 	todos: "orch-todos",
 } as const;
